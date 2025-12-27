@@ -1,0 +1,33 @@
+[package]
+name = "l0-signer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "L0 Threshold signing service"
+
+[features]
+default = []
+full-crypto = ["l0-core/full-crypto"]
+
+[dependencies]
+l0-core = { path = "../l0-core" }
+l0-network = { path = "../l0-network" }
+
+# Soul-Base 基础设施
+soulbase-crypto = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Utilities
+hex = "0.4"

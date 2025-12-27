@@ -1,0 +1,35 @@
+[package]
+name = "l0-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "L0 REST/GraphQL API server"
+
+[dependencies]
+l0-core = { path = "../l0-core" }
+l0-db = { path = "../l0-db" }
+
+# Soul-Base 基础设施
+soulbase-observe = { workspace = true }
+soulbase-types = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+
+# HTTP
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }

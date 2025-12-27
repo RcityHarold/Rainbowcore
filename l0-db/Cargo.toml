@@ -1,0 +1,36 @@
+[package]
+name = "l0-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "L0 Database layer - SurrealDB integration via soulbase-storage"
+
+[features]
+default = ["surreal"]
+surreal = ["soulbase-storage/surreal"]
+mock = ["soulbase-storage/mock"]
+
+[dependencies]
+l0-core = { path = "../l0-core" }
+
+# Soul-Base 基础设施 (复用 SurrealDB 集成)
+soulbase-storage = { workspace = true }
+soulbase-errors = { workspace = true }
+soulbase-types = { workspace = true }
+
+# Async
+async-trait = { workspace = true }
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Random
+rand = "0.8"

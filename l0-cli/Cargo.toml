@@ -1,0 +1,39 @@
+[package]
+name = "l0-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "L0 Command Line Interface"
+
+[[bin]]
+name = "l0"
+path = "src/main.rs"
+
+[dependencies]
+l0-core = { path = "../l0-core" }
+l0-db = { path = "../l0-db" }
+l0-api = { path = "../l0-api" }
+
+# Soul-Base
+soulbase-types = { workspace = true }
+soulbase-storage = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+
+# CLI
+clap = { workspace = true }
+
+# HTTP client
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Utilities
+hex = "0.4"
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

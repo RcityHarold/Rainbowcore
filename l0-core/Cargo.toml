@@ -1,0 +1,37 @@
+[package]
+name = "l0-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "L0 Core - Public Reality Ledger Types and Interfaces"
+
+[features]
+default = []
+# 启用完整签名支持
+full-crypto = ["soulbase-crypto/jws-ed25519", "soulbase-crypto/aead-xchacha"]
+
+[dependencies]
+# Soul-Base 基础设施 (复用)
+soulbase-types = { workspace = true }
+soulbase-errors = { workspace = true }
+soulbase-crypto = { workspace = true }
+
+# Async
+async-trait = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# L0 特定依赖
+hex = "0.4"
+
+[dev-dependencies]
+proptest = { workspace = true }
+tokio = { workspace = true }

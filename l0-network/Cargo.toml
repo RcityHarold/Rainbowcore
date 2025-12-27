@@ -1,0 +1,24 @@
+[package]
+name = "l0-network"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "L0 Network layer - P2P communication"
+
+[dependencies]
+l0-core = { path = "../l0-core" }
+
+# Soul-Base 基础设施
+soulbase-net = { workspace = true }
+soulbase-errors = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
