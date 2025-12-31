@@ -1,6 +1,10 @@
 //! Application state for the API server
 
-use l0_db::{CausalityService, IdentityService, L0Database, SurrealDatastore};
+use l0_db::{
+    AnchorService, BackfillService, CausalityService, ConsentService, DisputeService,
+    IdentityService, KnowledgeService, L0Database, ReceiptService, SurrealDatastore,
+    TipWitnessService,
+};
 use soulbase_types::prelude::TenantId;
 use std::sync::Arc;
 
@@ -11,6 +15,20 @@ pub struct AppState {
     pub identity: Arc<IdentityService>,
     /// Causality service
     pub causality: Arc<CausalityService>,
+    /// Knowledge service
+    pub knowledge: Arc<KnowledgeService>,
+    /// Consent service
+    pub consent: Arc<ConsentService>,
+    /// Dispute service
+    pub dispute: Arc<DisputeService>,
+    /// Receipt service
+    pub receipt: Arc<ReceiptService>,
+    /// TipWitness service
+    pub tipwitness: Arc<TipWitnessService>,
+    /// Backfill service
+    pub backfill: Arc<BackfillService>,
+    /// Anchor service
+    pub anchor: Arc<AnchorService>,
     /// Node ID (if running as a node)
     pub node_id: Option<String>,
     /// API version
@@ -24,7 +42,7 @@ impl AppState {
         tenant_id: TenantId,
         node_id: Option<String>,
     ) -> Result<Self, l0_core::error::LedgerError> {
-        let database = Arc::new(L0Database::new(datastore));
+        let database = Arc::new(L0Database::new(datastore.clone()));
 
         // Initialize schema
         database.init_schema().await.map_err(|e| {
@@ -32,7 +50,14 @@ impl AppState {
         })?;
 
         let identity = Arc::new(IdentityService::new(database.clone(), tenant_id.clone()));
-        let causality = Arc::new(CausalityService::new(database, tenant_id));
+        let causality = Arc::new(CausalityService::new(database.clone(), tenant_id.clone()));
+        let knowledge = Arc::new(KnowledgeService::new(datastore.clone(), tenant_id.clone()));
+        let consent = Arc::new(ConsentService::new(datastore.clone(), tenant_id.clone()));
+        let dispute = Arc::new(DisputeService::new(datastore.clone(), tenant_id.clone()));
+        let receipt = Arc::new(ReceiptService::new(datastore.clone(), tenant_id.clone()));
+        let tipwitness = Arc::new(TipWitnessService::new(database, tenant_id.clone()));
+        let backfill = Arc::new(BackfillService::new(datastore.clone(), tenant_id.clone()));
+        let anchor = Arc::new(AnchorService::new(datastore.clone(), tenant_id));
 
         // Initialize causality service
         causality.init().await?;
@@ -40,6 +65,13 @@ impl AppState {
         Ok(Self {
             identity,
             causality,
+            knowledge,
+            consent,
+            dispute,
+            receipt,
+            tipwitness,
+            backfill,
+            anchor,
             node_id,
             version: env!("CARGO_PKG_VERSION").to_string(),
         })

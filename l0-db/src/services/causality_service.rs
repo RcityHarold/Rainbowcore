@@ -124,6 +124,15 @@ impl CausalityService {
         })
     }
 
+    /// Get the latest epoch sequence number
+    pub async fn get_epoch_sequence(&self) -> LedgerResult<u64> {
+        self.database
+            .commitments
+            .get_latest_epoch_sequence(&self.tenant_id)
+            .await
+            .map_err(Self::map_db_error)
+    }
+
     /// Seal current batch and create snapshot (internal method)
     pub async fn seal_batch(&self) -> LedgerResult<BatchSnapshotEntity> {
         let mut tree = self.batch_tree.write().await;
@@ -199,7 +208,50 @@ impl Ledger for CausalityService {
     }
 
     async fn verify_integrity(&self) -> LedgerResult<bool> {
-        // TODO: Verify batch chain continuity
+        // Verify batch chain continuity
+        let batches = self
+            .database
+            .commitments
+            .list_batch_snapshots(&self.tenant_id, 10000) // Get all batches
+            .await
+            .map_err(Self::map_db_error)?;
+
+        if batches.is_empty() {
+            return Ok(true);
+        }
+
+        // Verify batch sequence continuity and parent chain
+        let mut prev_root: Option<String> = None;
+        let mut prev_seq: Option<u64> = None;
+
+        for batch in &batches {
+            // Check sequence continuity
+            if let Some(expected_seq) = prev_seq {
+                if batch.batch_sequence_no != expected_seq + 1 {
+                    return Ok(false); // Sequence gap detected
+                }
+            } else if batch.batch_sequence_no != 0 {
+                // First batch should start at 0
+                return Ok(false);
+            }
+
+            // Check parent root chain
+            if let Some(expected_parent) = &prev_root {
+                match &batch.parent_batch_root {
+                    Some(actual_parent) if actual_parent == expected_parent => {}
+                    _ => return Ok(false), // Parent chain broken
+                }
+            }
+
+            // Required fields check
+            if batch.batch_root.is_empty() {
+                return Ok(false);
+            }
+
+            prev_root = Some(batch.batch_root.clone());
+            prev_seq = Some(batch.batch_sequence_no);
+        }
+
         Ok(true)
     }
 }

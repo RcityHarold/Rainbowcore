@@ -24,12 +24,28 @@ impl L0ActorRepo {
         let session = self.datastore.session().await.map_err(L0DbError::Storage)?;
         let client = session.client();
 
-        let query = format!("CREATE {} CONTENT $data RETURN AFTER", ActorEntity::TABLE);
+        // Create the entity and then select with type::string(id) to convert Thing to String
+        let create_query = format!("CREATE {} CONTENT $data", ActorEntity::TABLE);
         let entity_clone = entity.clone();
 
-        let mut response = client
-            .query(&query)
+        client
+            .query(&create_query)
             .bind(("data", entity_clone))
+            .await
+            .map_err(|e| L0DbError::QueryError(e.to_string()))?;
+
+        // Fetch the created entity with proper id conversion
+        let select_query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant AND actor_id = $actor_id LIMIT 1",
+            ActorEntity::TABLE
+        );
+
+        let actor_id_str = entity.actor_id.clone();
+        let tenant_str = entity.tenant_id.0.clone();
+        let mut response = client
+            .query(&select_query)
+            .bind(("tenant", tenant_str))
+            .bind(("actor_id", actor_id_str))
             .await
             .map_err(|e| L0DbError::QueryError(e.to_string()))?;
 
@@ -50,7 +66,7 @@ impl L0ActorRepo {
         let client = session.client();
 
         let query = format!(
-            "SELECT * FROM {} WHERE tenant_id.inner = $tenant AND actor_id = $actor_id LIMIT 1",
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant AND actor_id = $actor_id LIMIT 1",
             ActorEntity::TABLE
         );
 
@@ -81,7 +97,7 @@ impl L0ActorRepo {
         let client = session.client();
 
         let query = format!(
-            "SELECT * FROM {} WHERE tenant_id.inner = $tenant AND public_key = $pubkey LIMIT 1",
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant AND public_key = $pubkey LIMIT 1",
             ActorEntity::TABLE
         );
 
@@ -113,7 +129,7 @@ impl L0ActorRepo {
         let client = session.client();
 
         let query = format!(
-            "UPDATE {} SET status = $status, updated_at = time::now() WHERE tenant_id.inner = $tenant AND actor_id = $actor_id",
+            "UPDATE {} SET status = $status, updated_at = time::now() WHERE tenant_id = $tenant AND actor_id = $actor_id",
             ActorEntity::TABLE
         );
 
@@ -143,7 +159,7 @@ impl L0ActorRepo {
         let client = session.client();
 
         let query = format!(
-            "UPDATE {} SET public_key = $pubkey, updated_at = time::now() WHERE tenant_id.inner = $tenant AND actor_id = $actor_id",
+            "UPDATE {} SET public_key = $pubkey, updated_at = time::now() WHERE tenant_id = $tenant AND actor_id = $actor_id",
             ActorEntity::TABLE
         );
 
@@ -177,7 +193,7 @@ impl L0ActorRepo {
         let mut response = match actor_type {
             Some(at) => {
                 let query = format!(
-                    "SELECT * FROM {} WHERE tenant_id.inner = $tenant AND actor_type = $type ORDER BY created_at DESC LIMIT $limit",
+                    "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant AND actor_type = $type ORDER BY created_at DESC LIMIT $limit",
                     ActorEntity::TABLE
                 );
                 let actor_type_str = at.to_string();
@@ -191,7 +207,7 @@ impl L0ActorRepo {
             }
             None => {
                 let query = format!(
-                    "SELECT * FROM {} WHERE tenant_id.inner = $tenant ORDER BY created_at DESC LIMIT $limit",
+                    "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant ORDER BY created_at DESC LIMIT $limit",
                     ActorEntity::TABLE
                 );
                 client
@@ -213,5 +229,111 @@ impl L0ActorRepo {
     /// Check if actor exists
     pub async fn exists(&self, tenant: &TenantId, actor_id: &str) -> L0DbResult<bool> {
         Ok(self.get_by_id(tenant, actor_id).await?.is_some())
+    }
+
+    /// List all actors for Merkle root computation
+    pub async fn list_all(&self, tenant: &TenantId) -> L0DbResult<Vec<ActorEntity>> {
+        let session = self.datastore.session().await.map_err(L0DbError::Storage)?;
+        let client = session.client();
+
+        let query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant ORDER BY created_at ASC",
+            ActorEntity::TABLE
+        );
+
+        let tenant_str = tenant.0.clone();
+        let mut response = client
+            .query(&query)
+            .bind(("tenant", tenant_str))
+            .await
+            .map_err(|e| L0DbError::QueryError(e.to_string()))?;
+
+        let results: Vec<ActorEntity> = response
+            .take(0)
+            .map_err(|e| L0DbError::QueryError(e.to_string()))?;
+
+        Ok(results)
+    }
+
+    /// Create key rotation record
+    pub async fn create_key_rotation(
+        &self,
+        entity: &crate::entities::KeyRotationEntity,
+    ) -> L0DbResult<crate::entities::KeyRotationEntity> {
+        use soulbase_storage::model::Entity;
+
+        let session = self.datastore.session().await.map_err(L0DbError::Storage)?;
+        let client = session.client();
+
+        let create_query = format!(
+            "CREATE {} CONTENT $data",
+            crate::entities::KeyRotationEntity::TABLE
+        );
+        let entity_clone = entity.clone();
+
+        client
+            .query(&create_query)
+            .bind(("data", entity_clone))
+            .await
+            .map_err(|e| L0DbError::QueryError(e.to_string()))?;
+
+        // Fetch with type::string(id) to convert Thing to String
+        let select_query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant AND actor_id = $actor_id AND rotated_at = $rotated_at LIMIT 1",
+            crate::entities::KeyRotationEntity::TABLE
+        );
+
+        let tenant_str = entity.tenant_id.0.clone();
+        let actor_id_str = entity.actor_id.clone();
+        let rotated_at = entity.rotated_at;
+
+        let mut response = client
+            .query(&select_query)
+            .bind(("tenant", tenant_str))
+            .bind(("actor_id", actor_id_str))
+            .bind(("rotated_at", rotated_at))
+            .await
+            .map_err(|e| L0DbError::QueryError(e.to_string()))?;
+
+        let result: Option<crate::entities::KeyRotationEntity> = response
+            .take(0)
+            .map_err(|e| L0DbError::QueryError(e.to_string()))?;
+
+        result.ok_or_else(|| L0DbError::QueryError("Failed to create key rotation".to_string()))
+    }
+
+    /// Get key rotation history for an actor
+    pub async fn get_key_rotations(
+        &self,
+        tenant: &TenantId,
+        actor_id: &str,
+        limit: u32,
+    ) -> L0DbResult<Vec<crate::entities::KeyRotationEntity>> {
+        use soulbase_storage::model::Entity;
+
+        let session = self.datastore.session().await.map_err(L0DbError::Storage)?;
+        let client = session.client();
+
+        let query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant AND actor_id = $actor_id ORDER BY rotated_at DESC LIMIT $limit",
+            crate::entities::KeyRotationEntity::TABLE
+        );
+
+        let tenant_str = tenant.0.clone();
+        let actor_id_str = actor_id.to_string();
+
+        let mut response = client
+            .query(&query)
+            .bind(("tenant", tenant_str))
+            .bind(("actor_id", actor_id_str))
+            .bind(("limit", limit))
+            .await
+            .map_err(|e| L0DbError::QueryError(e.to_string()))?;
+
+        let results: Vec<crate::entities::KeyRotationEntity> = response
+            .take(0)
+            .map_err(|e| L0DbError::QueryError(e.to_string()))?;
+
+        Ok(results)
     }
 }

@@ -26,6 +26,12 @@ pub enum SignerError {
     #[error("Session expired")]
     SessionExpired,
 
+    #[error("Session timed out after {attempts} attempts")]
+    SessionTimedOut { attempts: u32 },
+
+    #[error("Max retries exceeded: {0} attempts")]
+    MaxRetriesExceeded(u32),
+
     #[error("Duplicate signature from signer: {0}")]
     DuplicateSignature(String),
 
@@ -40,6 +46,40 @@ pub enum SignerError {
 
     #[error("Crypto error: {0}")]
     Crypto(String),
+
+    #[error("Retry in progress for session: {0}")]
+    RetryInProgress(String),
+
+    // DKG-related errors
+    #[error("Invalid DKG state: {0}")]
+    InvalidDkgState(String),
+
+    #[error("Duplicate DKG message from: {0}")]
+    DuplicateDkgMessage(String),
+
+    #[error("Invalid DKG message: {0}")]
+    InvalidDkgMessage(String),
+
+    #[error("Share not found for index: {0}")]
+    ShareNotFound(u32),
+
+    #[error("Invalid share from dealer: {0}")]
+    InvalidShare(String),
+
+    #[error("Insufficient DKG participants: have {have}, need {need}")]
+    InsufficientDkgParticipants { have: usize, need: usize },
+
+    #[error("DKG not complete")]
+    DkgNotComplete,
+
+    #[error("Duplicate session: {0}")]
+    DuplicateSession(String),
+
+    #[error("Insufficient shares: have {have}, need {need}")]
+    InsufficientShares { have: usize, need: usize },
+
+    #[error("Invalid threshold: t={t} > n={n}")]
+    InvalidThreshold { t: usize, n: usize },
 }
 
 /// Result type for signer operations

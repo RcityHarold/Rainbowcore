@@ -10,13 +10,14 @@ use crate::state::AppState;
 /// Health check endpoint
 pub async fn health_check(State(state): State<AppState>) -> ApiResult<Json<HealthResponse>> {
     let batch_seq = state.causality.current_sequence().await.unwrap_or(0);
+    let epoch_seq = state.causality.get_epoch_sequence().await.unwrap_or(0);
 
     Ok(Json(HealthResponse {
         status: "healthy".to_string(),
         version: state.version.clone(),
         node_id: state.node_id.clone(),
         current_batch_sequence: batch_seq,
-        current_epoch_sequence: 0, // TODO: Track epoch sequence
+        current_epoch_sequence: epoch_seq,
     }))
 }
 
@@ -33,12 +34,13 @@ pub async fn ready_check(State(state): State<AppState>) -> ApiResult<Json<Health
     };
 
     let batch_seq = state.causality.current_sequence().await.unwrap_or(0);
+    let epoch_seq = state.causality.get_epoch_sequence().await.unwrap_or(0);
 
     Ok(Json(HealthResponse {
         status: status.to_string(),
         version: state.version.clone(),
         node_id: state.node_id.clone(),
         current_batch_sequence: batch_seq,
-        current_epoch_sequence: 0,
+        current_epoch_sequence: epoch_seq,
     }))
 }

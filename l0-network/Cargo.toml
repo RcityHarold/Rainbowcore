@@ -20,5 +20,11 @@ async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+# Time
+chrono = { workspace = true }
+
 # Error handling
 thiserror = { workspace = true }
+
+# Utilities
+hex = "0.4"

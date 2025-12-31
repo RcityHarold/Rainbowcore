@@ -7,12 +7,21 @@
 //! 2. Threshold signing
 //! 3. Epoch aggregation
 //! 4. Chain anchoring (P4)
+//!
+//! DKG (Distributed Key Generation):
+//! - Feldman's VSS-based protocol
+//! - Share splitting and reconstruction
+//! - Multi-signer coordination
 
+pub mod crypto;
+pub mod dkg;
 pub mod error;
 pub mod session;
 pub mod signer;
 pub mod signer_set;
 
+pub use crypto::*;
+pub use dkg::*;
 pub use error::*;
 pub use session::*;
 pub use signer::*;

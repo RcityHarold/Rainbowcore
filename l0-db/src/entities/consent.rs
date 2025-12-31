@@ -102,3 +102,63 @@ impl Entity for DelegationEntity {
         &self.tenant_id
     }
 }
+
+/// Emergency override entity
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmergencyOverrideEntity {
+    pub id: String,
+    pub tenant_id: TenantId,
+    pub override_id: String,
+    pub justification_type: String,
+    pub justification_digest: String,
+    pub overridden_consent_ref: Option<String>,
+    pub authorized_by: String,
+    pub executed_by: String,
+    pub affected_actors: Vec<String>,
+    pub action_taken_digest: String,
+    pub initiated_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub review_deadline: DateTime<Utc>,
+    pub reviewed_by: Option<String>,
+    pub review_outcome_digest: Option<String>,
+    pub receipt_id: Option<String>,
+}
+
+impl Entity for EmergencyOverrideEntity {
+    const TABLE: &'static str = "l0_emergency_override";
+
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn tenant(&self) -> &TenantId {
+        &self.tenant_id
+    }
+}
+
+/// Covenant entity for space covenants
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CovenantEntity {
+    pub id: String,
+    pub tenant_id: TenantId,
+    pub covenant_id: String,
+    pub space_id: String,
+    pub covenant_digest: String,
+    pub signatories: Vec<String>,
+    pub effective_from: DateTime<Utc>,
+    pub status: String,
+    pub amendments_digest: Option<String>,
+    pub receipt_id: Option<String>,
+}
+
+impl Entity for CovenantEntity {
+    const TABLE: &'static str = "l0_covenant";
+
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn tenant(&self) -> &TenantId {
+        &self.tenant_id
+    }
+}

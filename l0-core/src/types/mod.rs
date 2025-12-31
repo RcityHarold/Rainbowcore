@@ -7,19 +7,21 @@
 //! - *_digest suffix for digests
 
 mod actor;
+mod anchor;
+mod backfill;
+mod common;
+mod consent;
+mod dispute;
 mod receipt;
 mod snapshot;
 mod version;
-mod dispute;
-mod consent;
-mod backfill;
-mod common;
 
 pub use actor::*;
+pub use anchor::*;
+pub use backfill::*;
+pub use common::*;
+pub use consent::*;
+pub use dispute::*;
 pub use receipt::*;
 pub use snapshot::*;
 pub use version::*;
-pub use dispute::*;
-pub use consent::*;
-pub use backfill::*;
-pub use common::*;

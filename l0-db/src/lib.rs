@@ -38,7 +38,11 @@ pub use entities::*;
 pub use error::*;
 pub use repos::*;
 pub use schema::L0_SCHEMA;
-pub use services::{CausalityService, IdentityService};
+pub use services::{
+    AnchorService, BackfillService, CausalityService, ConsentService, DisputeService,
+    IdentityService, KnowledgeService, ReceiptService, TipWitnessChainVerification,
+    TipWitnessService, TipWitnessSubmission,
+};
 
 // Re-export soulbase-storage for convenience
 pub use soulbase_storage::model::{Entity, Page, QueryParams};

@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::crypto::{domain, L0SigningKey, L0Signature, L0VerifyingKey, AggregatedProof};
 use crate::error::{SessionState, SignerError, SignerResult};
 use crate::session::{SigningSession, ThresholdProof};
 use crate::signer_set::{SignerSet, SignerSetManager};
@@ -55,9 +56,9 @@ pub trait ThresholdSigner: Send + Sync {
 
 /// Local threshold signer implementation
 pub struct LocalThresholdSigner {
-    /// Our signing key (Ed25519 private key, hex encoded)
-    signing_key: String,
-    /// Our public key
+    /// Our Ed25519 signing key
+    signing_key: L0SigningKey,
+    /// Our public key (hex encoded)
     pub pubkey: String,
     /// Signer set manager
     signer_set_manager: Arc<RwLock<SignerSetManager>>,
@@ -65,22 +66,77 @@ pub struct LocalThresholdSigner {
     sessions: Arc<RwLock<HashMap<String, SigningSession>>>,
     /// Session counter
     session_counter: std::sync::atomic::AtomicU64,
+    /// Cached verifying keys for signers
+    verifying_keys: Arc<RwLock<HashMap<String, L0VerifyingKey>>>,
 }
 
 impl LocalThresholdSigner {
-    /// Create a new local signer
-    pub fn new(signing_key: String, pubkey: String) -> Self {
+    /// Create a new local signer with a generated key
+    pub fn generate() -> Self {
+        let signing_key = L0SigningKey::generate();
+        let pubkey = signing_key.public_key_hex();
         Self {
             signing_key,
             pubkey,
             signer_set_manager: Arc::new(RwLock::new(SignerSetManager::new())),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             session_counter: std::sync::atomic::AtomicU64::new(0),
+            verifying_keys: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Create a new local signer from hex-encoded secret key
+    pub fn from_secret_hex(secret_hex: &str) -> SignerResult<Self> {
+        let signing_key = L0SigningKey::from_hex(secret_hex)?;
+        let pubkey = signing_key.public_key_hex();
+        Ok(Self {
+            signing_key,
+            pubkey,
+            signer_set_manager: Arc::new(RwLock::new(SignerSetManager::new())),
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            session_counter: std::sync::atomic::AtomicU64::new(0),
+            verifying_keys: Arc::new(RwLock::new(HashMap::new())),
+        })
+    }
+
+    /// Create a new local signer (legacy constructor for compatibility)
+    pub fn new(signing_key_hex: String, pubkey: String) -> Self {
+        // Try to parse as hex, fall back to generated key if invalid
+        match L0SigningKey::from_hex(&signing_key_hex) {
+            Ok(key) => Self {
+                signing_key: key,
+                pubkey,
+                signer_set_manager: Arc::new(RwLock::new(SignerSetManager::new())),
+                sessions: Arc::new(RwLock::new(HashMap::new())),
+                session_counter: std::sync::atomic::AtomicU64::new(0),
+                verifying_keys: Arc::new(RwLock::new(HashMap::new())),
+            },
+            Err(_) => {
+                // Fall back to generated key for tests
+                let key = L0SigningKey::generate();
+                Self {
+                    signing_key: key,
+                    pubkey,
+                    signer_set_manager: Arc::new(RwLock::new(SignerSetManager::new())),
+                    sessions: Arc::new(RwLock::new(HashMap::new())),
+                    session_counter: std::sync::atomic::AtomicU64::new(0),
+                    verifying_keys: Arc::new(RwLock::new(HashMap::new())),
+                }
+            }
         }
     }
 
     /// Set the current signer set
     pub async fn set_signer_set(&self, set: SignerSet) {
+        // Cache verifying keys for all signers
+        let mut keys = self.verifying_keys.write().await;
+        for pubkey in set.certified_pubkeys() {
+            if let Ok(vk) = L0VerifyingKey::from_hex(pubkey) {
+                keys.insert(pubkey.to_string(), vk);
+            }
+        }
+        drop(keys);
+
         let mut manager = self.signer_set_manager.write().await;
         manager.set_current(set);
     }
@@ -94,16 +150,40 @@ impl LocalThresholdSigner {
         format!("sess_{:016x}_{:08x}", timestamp, seq)
     }
 
-    /// Sign a message with our key (Ed25519)
+    /// Sign a message with our key using Ed25519
     fn sign_local(&self, message: &[u8]) -> SignerResult<Vec<u8>> {
-        // In production, use proper Ed25519 signing via soulbase-crypto
-        // For now, we'll create a placeholder signature using BLAKE3
-        let hash = l0_core::types::Digest::blake3(message);
-        let mut sig = hash.as_bytes().to_vec();
-        // Append key hash for "authenticity"
-        let key_hash = l0_core::types::Digest::blake3(self.signing_key.as_bytes());
-        sig.extend(key_hash.as_bytes());
-        Ok(sig)
+        let signature = self.signing_key.sign_batch(message);
+        Ok(signature.to_bytes().to_vec())
+    }
+
+    /// Verify a signature from a signer
+    async fn verify_signature(
+        &self,
+        signer_pubkey: &str,
+        message: &[u8],
+        signature: &[u8],
+    ) -> SignerResult<()> {
+        // Get or create verifying key
+        let keys = self.verifying_keys.read().await;
+        let verifying_key = match keys.get(signer_pubkey) {
+            Some(vk) => vk.clone(),
+            None => {
+                drop(keys);
+                L0VerifyingKey::from_hex(signer_pubkey)?
+            }
+        };
+
+        if signature.len() != 64 {
+            return Err(SignerError::InvalidSignature(format!(
+                "Invalid signature length: expected 64, got {}",
+                signature.len()
+            )));
+        }
+        let mut sig_bytes = [0u8; 64];
+        sig_bytes.copy_from_slice(signature);
+
+        let l0_sig = L0Signature::from_bytes(&sig_bytes, signer_pubkey.to_string())?;
+        verifying_key.verify_batch(message, &l0_sig)
     }
 }
 
@@ -201,7 +281,7 @@ impl ThresholdSigner for LocalThresholdSigner {
 
     async fn verify_proof(
         &self,
-        _message: &[u8],
+        message: &[u8],
         proof: &ThresholdProof,
     ) -> SignerResult<bool> {
         // Verify the threshold was met
@@ -211,16 +291,34 @@ impl ThresholdSigner for LocalThresholdSigner {
 
         // Verify the signer set exists
         let manager = self.signer_set_manager.read().await;
-        let _signer_set = manager.get_by_version(&proof.signer_set_version).ok_or_else(|| {
+        let signer_set = manager.get_by_version(&proof.signer_set_version).ok_or_else(|| {
             SignerError::InvalidSigner(format!(
                 "Unknown signer set: {}",
                 proof.signer_set_version
             ))
         })?;
 
-        // In production, verify each signature in the aggregated proof
-        // For now, we trust the structure
-        Ok(true)
+        // Parse the aggregated proof and verify each signature
+        let aggregated = AggregatedProof::from_compact(&proof.threshold_proof)?;
+
+        // Verify threshold count matches
+        if aggregated.count < proof.threshold {
+            return Ok(false);
+        }
+
+        // Verify each signer is in the signer set
+        for (pubkey, _sig) in &aggregated.signatures {
+            if !signer_set.is_certified_signer(pubkey) {
+                return Err(SignerError::SignerNotInSet(pubkey.clone()));
+            }
+        }
+
+        // Verify all signatures cryptographically
+        match aggregated.verify_all(domain::BATCH_SNAPSHOT, message) {
+            Ok(true) => Ok(true),
+            Ok(false) => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 }
 

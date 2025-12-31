@@ -6,18 +6,29 @@
 //! - Knowledge-Index Ledger: Zero-plaintext content indexes
 //! - Policy-Consent Ledger: Consent records and access control
 //! - Dispute-Resolution Ledger: Verdicts, repairs, and clawbacks
+//!
+//! Plus support systems:
+//! - Receipt Ledger: L0 Receipt and Fee tracking
+//! - Backfill Ledger: B-level to A-level evidence upgrade
+//! - Anchor Ledger: External blockchain anchoring
 
-mod identity;
+mod anchor;
+mod backfill;
 mod causality;
-mod knowledge;
 mod consent;
 mod dispute;
+mod identity;
+mod knowledge;
+mod receipt;
 
-pub use identity::*;
+pub use anchor::*;
+pub use backfill::*;
 pub use causality::*;
-pub use knowledge::*;
 pub use consent::*;
 pub use dispute::*;
+pub use identity::*;
+pub use knowledge::*;
+pub use receipt::*;
 
 use crate::error::LedgerError;
 use crate::types::{Digest, ReceiptId};

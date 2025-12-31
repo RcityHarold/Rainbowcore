@@ -24,12 +24,28 @@ impl L0ReceiptRepo {
         let session = self.datastore.session().await.map_err(L0DbError::Storage)?;
         let client = session.client();
 
-        let query = format!("CREATE {} CONTENT $data RETURN AFTER", ReceiptEntity::TABLE);
+        // Create the entity first
+        let create_query = format!("CREATE {} CONTENT $data", ReceiptEntity::TABLE);
         let entity_clone = entity.clone();
 
-        let mut response = client
-            .query(&query)
+        client
+            .query(&create_query)
             .bind(("data", entity_clone))
+            .await
+            .map_err(|e| L0DbError::QueryError(e.to_string()))?;
+
+        // Fetch with type::string(id) to convert Thing to String
+        let select_query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant AND receipt_id = $receipt_id LIMIT 1",
+            ReceiptEntity::TABLE
+        );
+
+        let receipt_id_str = entity.receipt_id.clone();
+        let tenant_str = entity.tenant_id.0.clone();
+        let mut response = client
+            .query(&select_query)
+            .bind(("tenant", tenant_str))
+            .bind(("receipt_id", receipt_id_str))
             .await
             .map_err(|e| L0DbError::QueryError(e.to_string()))?;
 
@@ -50,7 +66,7 @@ impl L0ReceiptRepo {
         let client = session.client();
 
         let query = format!(
-            "SELECT * FROM {} WHERE tenant_id.inner = $tenant AND receipt_id = $receipt_id LIMIT 1",
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant AND receipt_id = $receipt_id LIMIT 1",
             ReceiptEntity::TABLE
         );
 
@@ -81,7 +97,7 @@ impl L0ReceiptRepo {
         let client = session.client();
 
         let query = format!(
-            "SELECT * FROM {} WHERE tenant_id.inner = $tenant AND batch_sequence_no = $batch_seq",
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant AND batch_sequence_no = $batch_seq",
             ReceiptEntity::TABLE
         );
 
@@ -118,7 +134,7 @@ impl L0ReceiptRepo {
         let client = session.client();
 
         let query = format!(
-            "UPDATE {} SET rejected = true, reject_reason_code = $reason WHERE tenant_id.inner = $tenant AND receipt_id = $receipt_id",
+            "UPDATE {} SET rejected = true, reject_reason_code = $reason WHERE tenant_id = $tenant AND receipt_id = $receipt_id",
             ReceiptEntity::TABLE
         );
 
@@ -147,12 +163,28 @@ impl L0ReceiptRepo {
         let session = self.datastore.session().await.map_err(L0DbError::Storage)?;
         let client = session.client();
 
-        let query = format!("CREATE {} CONTENT $data RETURN AFTER", TipWitnessEntity::TABLE);
+        // Create the entity first
+        let create_query = format!("CREATE {} CONTENT $data", TipWitnessEntity::TABLE);
         let entity_clone = entity.clone();
 
-        let mut response = client
-            .query(&query)
+        client
+            .query(&create_query)
             .bind(("data", entity_clone))
+            .await
+            .map_err(|e| L0DbError::QueryError(e.to_string()))?;
+
+        // Fetch with type::string(id) to convert Thing to String
+        let select_query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant AND tip_witness_id = $tip_witness_id LIMIT 1",
+            TipWitnessEntity::TABLE
+        );
+
+        let tip_witness_id_str = entity.tip_witness_id.clone();
+        let tenant_str = entity.tenant_id.0.clone();
+        let mut response = client
+            .query(&select_query)
+            .bind(("tenant", tenant_str))
+            .bind(("tip_witness_id", tip_witness_id_str))
             .await
             .map_err(|e| L0DbError::QueryError(e.to_string()))?;
 
@@ -173,7 +205,7 @@ impl L0ReceiptRepo {
         let client = session.client();
 
         let query = format!(
-            "SELECT * FROM {} WHERE tenant_id.inner = $tenant AND actor_id = $actor ORDER BY witnessed_at DESC LIMIT 1",
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant AND actor_id = $actor ORDER BY witnessed_at DESC LIMIT 1",
             TipWitnessEntity::TABLE
         );
 
@@ -205,7 +237,7 @@ impl L0ReceiptRepo {
         let client = session.client();
 
         let query = format!(
-            "SELECT * FROM {} WHERE tenant_id.inner = $tenant AND actor_id = $actor ORDER BY witnessed_at DESC LIMIT $limit",
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant AND actor_id = $actor ORDER BY witnessed_at DESC LIMIT $limit",
             TipWitnessEntity::TABLE
         );
 
@@ -237,12 +269,28 @@ impl L0ReceiptRepo {
         let session = self.datastore.session().await.map_err(L0DbError::Storage)?;
         let client = session.client();
 
-        let query = format!("CREATE {} CONTENT $data RETURN AFTER", FeeReceiptEntity::TABLE);
+        // Create the entity first
+        let create_query = format!("CREATE {} CONTENT $data", FeeReceiptEntity::TABLE);
         let entity_clone = entity.clone();
 
-        let mut response = client
-            .query(&query)
+        client
+            .query(&create_query)
             .bind(("data", entity_clone))
+            .await
+            .map_err(|e| L0DbError::QueryError(e.to_string()))?;
+
+        // Fetch with type::string(id) to convert Thing to String
+        let select_query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant AND fee_receipt_id = $fee_receipt_id LIMIT 1",
+            FeeReceiptEntity::TABLE
+        );
+
+        let fee_receipt_id_str = entity.fee_receipt_id.clone();
+        let tenant_str = entity.tenant_id.0.clone();
+        let mut response = client
+            .query(&select_query)
+            .bind(("tenant", tenant_str))
+            .bind(("fee_receipt_id", fee_receipt_id_str))
             .await
             .map_err(|e| L0DbError::QueryError(e.to_string()))?;
 
@@ -263,7 +311,7 @@ impl L0ReceiptRepo {
         let client = session.client();
 
         let query = format!(
-            "SELECT * FROM {} WHERE tenant_id.inner = $tenant AND fee_receipt_id = $fee_id LIMIT 1",
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant AND fee_receipt_id = $fee_id LIMIT 1",
             FeeReceiptEntity::TABLE
         );
 
@@ -294,7 +342,7 @@ impl L0ReceiptRepo {
         let client = session.client();
 
         let query = format!(
-            "UPDATE {} SET status = 'settled', settled_at = time::now() WHERE tenant_id.inner = $tenant AND fee_receipt_id = $fee_id",
+            "UPDATE {} SET status = 'settled', settled_at = time::now() WHERE tenant_id = $tenant AND fee_receipt_id = $fee_id",
             FeeReceiptEntity::TABLE
         );
 
@@ -321,7 +369,7 @@ impl L0ReceiptRepo {
         let client = session.client();
 
         let query = format!(
-            "SELECT * FROM {} WHERE tenant_id.inner = $tenant AND payer_actor_id = $payer AND status = 'pending' ORDER BY created_at ASC",
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant AND payer_actor_id = $payer AND status = 'pending' ORDER BY created_at ASC",
             FeeReceiptEntity::TABLE
         );
 

@@ -25,12 +25,28 @@ impl L0CommitmentRepo {
         let session = self.datastore.session().await.map_err(L0DbError::Storage)?;
         let client = session.client();
 
-        let query = format!("CREATE {} CONTENT $data RETURN AFTER", CommitmentEntity::TABLE);
+        // Create the entity first
+        let create_query = format!("CREATE {} CONTENT $data", CommitmentEntity::TABLE);
         let entity_clone = entity.clone();
 
-        let mut response = client
-            .query(&query)
+        client
+            .query(&create_query)
             .bind(("data", entity_clone))
+            .await
+            .map_err(|e| L0DbError::QueryError(e.to_string()))?;
+
+        // Fetch with type::string(id) to convert Thing to String
+        let select_query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant AND commitment_id = $commitment_id LIMIT 1",
+            CommitmentEntity::TABLE
+        );
+
+        let commitment_id_str = entity.commitment_id.clone();
+        let tenant_str = entity.tenant_id.0.clone();
+        let mut response = client
+            .query(&select_query)
+            .bind(("tenant", tenant_str))
+            .bind(("commitment_id", commitment_id_str))
             .await
             .map_err(|e| L0DbError::QueryError(e.to_string()))?;
 
@@ -51,7 +67,7 @@ impl L0CommitmentRepo {
         let client = session.client();
 
         let query = format!(
-            "SELECT * FROM {} WHERE tenant_id.inner = $tenant AND commitment_id = $commitment_id LIMIT 1",
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant AND commitment_id = $commitment_id LIMIT 1",
             CommitmentEntity::TABLE
         );
 
@@ -83,7 +99,7 @@ impl L0CommitmentRepo {
         let client = session.client();
 
         let query = format!(
-            "SELECT * FROM {} WHERE tenant_id.inner = $tenant AND actor_id = $actor ORDER BY sequence_no DESC LIMIT $limit",
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant AND actor_id = $actor ORDER BY sequence_no DESC LIMIT $limit",
             CommitmentEntity::TABLE
         );
 
@@ -115,7 +131,7 @@ impl L0CommitmentRepo {
         let client = session.client();
 
         let query = format!(
-            "SELECT * FROM {} WHERE tenant_id.inner = $tenant AND actor_id = $actor ORDER BY sequence_no DESC LIMIT 1",
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant AND actor_id = $actor ORDER BY sequence_no DESC LIMIT 1",
             CommitmentEntity::TABLE
         );
 
@@ -146,7 +162,7 @@ impl L0CommitmentRepo {
         let client = session.client();
 
         let query = format!(
-            "SELECT * FROM {} WHERE tenant_id.inner = $tenant AND batch_sequence_no IS NONE ORDER BY created_at ASC LIMIT $limit",
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant AND batch_sequence_no IS NONE ORDER BY created_at ASC LIMIT $limit",
             CommitmentEntity::TABLE
         );
 
@@ -178,7 +194,7 @@ impl L0CommitmentRepo {
 
         for id in commitment_ids {
             let query = format!(
-                "UPDATE {} SET batch_sequence_no = $batch_seq WHERE tenant_id.inner = $tenant AND commitment_id = $id",
+                "UPDATE {} SET batch_sequence_no = $batch_seq WHERE tenant_id = $tenant AND commitment_id = $id",
                 CommitmentEntity::TABLE
             );
 
@@ -204,12 +220,25 @@ impl L0CommitmentRepo {
         let session = self.datastore.session().await.map_err(L0DbError::Storage)?;
         let client = session.client();
 
-        let query = format!("CREATE {} CONTENT $data RETURN AFTER", BatchSnapshotEntity::TABLE);
+        // Create the entity first
+        let create_query = format!("CREATE {} CONTENT $data", BatchSnapshotEntity::TABLE);
         let entity_clone = entity.clone();
 
-        let mut response = client
-            .query(&query)
+        client
+            .query(&create_query)
             .bind(("data", entity_clone))
+            .await
+            .map_err(|e| L0DbError::QueryError(e.to_string()))?;
+
+        // Fetch with type::string(id) to convert Thing to String
+        let select_query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE batch_sequence_no = $seq LIMIT 1",
+            BatchSnapshotEntity::TABLE
+        );
+
+        let mut response = client
+            .query(&select_query)
+            .bind(("seq", entity.batch_sequence_no))
             .await
             .map_err(|e| L0DbError::QueryError(e.to_string()))?;
 
@@ -230,7 +259,7 @@ impl L0CommitmentRepo {
         let client = session.client();
 
         let query = format!(
-            "SELECT * FROM {} WHERE tenant_id.inner = $tenant AND batch_sequence_no = $seq LIMIT 1",
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant AND batch_sequence_no = $seq LIMIT 1",
             BatchSnapshotEntity::TABLE
         );
 
@@ -259,7 +288,7 @@ impl L0CommitmentRepo {
         let client = session.client();
 
         let query = format!(
-            "SELECT * FROM {} WHERE tenant_id.inner = $tenant ORDER BY batch_sequence_no DESC LIMIT 1",
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant ORDER BY batch_sequence_no DESC LIMIT 1",
             BatchSnapshotEntity::TABLE
         );
 
@@ -288,7 +317,7 @@ impl L0CommitmentRepo {
         let client = session.client();
 
         let query = format!(
-            "SELECT * FROM {} WHERE tenant_id.inner = $tenant AND batch_sequence_no = $batch_seq ORDER BY sequence_no ASC",
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant AND batch_sequence_no = $batch_seq ORDER BY sequence_no ASC",
             CommitmentEntity::TABLE
         );
 
@@ -321,11 +350,11 @@ impl L0CommitmentRepo {
 
         let query = match scope_type {
             Some(_) => format!(
-                "SELECT * FROM {} WHERE tenant_id.inner = $tenant AND actor_id = $actor AND scope_type = $scope ORDER BY sequence_no DESC LIMIT $limit",
+                "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant AND actor_id = $actor AND scope_type = $scope ORDER BY sequence_no DESC LIMIT $limit",
                 CommitmentEntity::TABLE
             ),
             None => format!(
-                "SELECT * FROM {} WHERE tenant_id.inner = $tenant AND actor_id = $actor ORDER BY sequence_no DESC LIMIT $limit",
+                "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant AND actor_id = $actor ORDER BY sequence_no DESC LIMIT $limit",
                 CommitmentEntity::TABLE
             ),
         };
@@ -372,11 +401,11 @@ impl L0CommitmentRepo {
 
         let query = match scope_type {
             Some(_) => format!(
-                "SELECT * FROM {} WHERE tenant_id.inner = $tenant AND created_at >= $start AND created_at <= $end AND scope_type = $scope ORDER BY created_at ASC",
+                "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant AND created_at >= $start AND created_at <= $end AND scope_type = $scope ORDER BY created_at ASC",
                 CommitmentEntity::TABLE
             ),
             None => format!(
-                "SELECT * FROM {} WHERE tenant_id.inner = $tenant AND created_at >= $start AND created_at <= $end ORDER BY created_at ASC",
+                "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant AND created_at >= $start AND created_at <= $end ORDER BY created_at ASC",
                 CommitmentEntity::TABLE
             ),
         };
@@ -417,12 +446,25 @@ impl L0CommitmentRepo {
         let session = self.datastore.session().await.map_err(L0DbError::Storage)?;
         let client = session.client();
 
-        let query = format!("CREATE {} CONTENT $data RETURN AFTER", EpochSnapshotEntity::TABLE);
+        // Create the entity first
+        let create_query = format!("CREATE {} CONTENT $data", EpochSnapshotEntity::TABLE);
         let entity_clone = entity.clone();
 
-        let mut response = client
-            .query(&query)
+        client
+            .query(&create_query)
             .bind(("data", entity_clone))
+            .await
+            .map_err(|e| L0DbError::QueryError(e.to_string()))?;
+
+        // Fetch with type::string(id) to convert Thing to String
+        let select_query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE epoch_sequence_no = $seq LIMIT 1",
+            EpochSnapshotEntity::TABLE
+        );
+
+        let mut response = client
+            .query(&select_query)
+            .bind(("seq", entity.epoch_sequence_no))
             .await
             .map_err(|e| L0DbError::QueryError(e.to_string()))?;
 
@@ -443,7 +485,7 @@ impl L0CommitmentRepo {
         let client = session.client();
 
         let query = format!(
-            "SELECT * FROM {} WHERE tenant_id.inner = $tenant AND epoch_sequence_no = $seq LIMIT 1",
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant AND epoch_sequence_no = $seq LIMIT 1",
             EpochSnapshotEntity::TABLE
         );
 
@@ -461,5 +503,65 @@ impl L0CommitmentRepo {
             .map_err(|e| L0DbError::QueryError(e.to_string()))?;
 
         Ok(result)
+    }
+
+    /// List all batch snapshots for chain verification
+    pub async fn list_batch_snapshots(
+        &self,
+        tenant: &TenantId,
+        limit: u32,
+    ) -> L0DbResult<Vec<BatchSnapshotEntity>> {
+        let session = self.datastore.session().await.map_err(L0DbError::Storage)?;
+        let client = session.client();
+
+        let query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant ORDER BY batch_sequence_no ASC LIMIT $limit",
+            BatchSnapshotEntity::TABLE
+        );
+
+        let tenant_str = tenant.0.clone();
+
+        let mut response = client
+            .query(&query)
+            .bind(("tenant", tenant_str))
+            .bind(("limit", limit))
+            .await
+            .map_err(|e| L0DbError::QueryError(e.to_string()))?;
+
+        let results: Vec<BatchSnapshotEntity> = response
+            .take(0)
+            .map_err(|e| L0DbError::QueryError(e.to_string()))?;
+
+        Ok(results)
+    }
+
+    /// Get the latest epoch sequence number
+    pub async fn get_latest_epoch_sequence(&self, tenant: &TenantId) -> L0DbResult<u64> {
+        let session = self.datastore.session().await.map_err(L0DbError::Storage)?;
+        let client = session.client();
+
+        let query = format!(
+            "SELECT epoch_sequence_no FROM {} WHERE tenant_id = $tenant ORDER BY epoch_sequence_no DESC LIMIT 1",
+            EpochSnapshotEntity::TABLE
+        );
+
+        let tenant_str = tenant.0.clone();
+
+        let mut response = client
+            .query(&query)
+            .bind(("tenant", tenant_str))
+            .await
+            .map_err(|e| L0DbError::QueryError(e.to_string()))?;
+
+        #[derive(serde::Deserialize)]
+        struct SeqResult {
+            epoch_sequence_no: u64,
+        }
+
+        let result: Option<SeqResult> = response
+            .take(0)
+            .map_err(|e| L0DbError::QueryError(e.to_string()))?;
+
+        Ok(result.map(|r| r.epoch_sequence_no).unwrap_or(0))
     }
 }

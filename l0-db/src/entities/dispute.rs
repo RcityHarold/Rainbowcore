@@ -122,3 +122,30 @@ impl Entity for RepairCheckpointEntity {
         &self.tenant_id
     }
 }
+
+/// Appeal entity for appealing verdicts
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppealEntity {
+    pub id: String,
+    pub tenant_id: TenantId,
+    pub appeal_id: String,
+    pub verdict_id: String,
+    pub filed_by: String,
+    pub grounds_digest: String,
+    pub new_evidence_digest: Option<String>,
+    pub filed_at: DateTime<Utc>,
+    pub status: String,
+    pub receipt_id: Option<String>,
+}
+
+impl Entity for AppealEntity {
+    const TABLE: &'static str = "l0_appeal";
+
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn tenant(&self) -> &TenantId {
+        &self.tenant_id
+    }
+}

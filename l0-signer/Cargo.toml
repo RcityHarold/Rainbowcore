@@ -16,6 +16,10 @@ l0-network = { path = "../l0-network" }
 # Soul-Base 基础设施
 soulbase-crypto = { workspace = true }
 
+# Cryptography (Ed25519 for threshold signing)
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+
 # Async
 tokio = { workspace = true }
 async-trait = { workspace = true }
@@ -31,3 +35,4 @@ thiserror = { workspace = true }
 
 # Utilities
 hex = "0.4"
+sha2 = "0.10"

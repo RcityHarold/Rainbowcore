@@ -33,3 +33,9 @@ thiserror = { workspace = true }
 
 # Logging
 tracing = { workspace = true }
+
+[dev-dependencies]
+axum-test = "16"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+soulbase-storage = { workspace = true }
+chrono = { workspace = true }

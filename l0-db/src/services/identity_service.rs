@@ -4,6 +4,7 @@
 
 use async_trait::async_trait;
 use chrono::Utc;
+use l0_core::crypto::IncrementalMerkleTree;
 use l0_core::error::LedgerError;
 use l0_core::ledger::{IdentityLedger, Ledger, LedgerResult, QueryOptions};
 use l0_core::types::{
@@ -12,7 +13,8 @@ use l0_core::types::{
 use soulbase_types::prelude::TenantId;
 use std::sync::Arc;
 
-use crate::entities::ActorEntity;
+use soulbase_storage::model::Entity;
+use crate::entities::{ActorEntity, KeyRotationEntity};
 use crate::repos::L0Database;
 use crate::error::L0DbError;
 
@@ -90,12 +92,74 @@ impl Ledger for IdentityService {
     }
 
     async fn current_root(&self) -> LedgerResult<Digest> {
-        // TODO: Compute actual Merkle root of all actors
-        Ok(Digest::zero())
+        // Compute Merkle root of all actors
+        let actors = self
+            .database
+            .actors
+            .list_all(&self.tenant_id)
+            .await
+            .map_err(Self::map_db_error)?;
+
+        if actors.is_empty() {
+            return Ok(Digest::zero());
+        }
+
+        let mut tree = IncrementalMerkleTree::new();
+        for actor in &actors {
+            // Compute digest from actor data: actor_id + public_key + status
+            let actor_data = format!(
+                "{}:{}:{}:{}",
+                actor.actor_id, actor.actor_type, actor.public_key, actor.status
+            );
+            let digest = Digest::blake3(actor_data.as_bytes());
+            tree.add(digest);
+        }
+
+        Ok(tree.root())
     }
 
     async fn verify_integrity(&self) -> LedgerResult<bool> {
-        // TODO: Implement integrity verification
+        // Verify integrity by checking:
+        // 1. All actors have valid structure
+        // 2. No duplicate actor_ids
+        // 3. All required fields are present
+        let actors = self
+            .database
+            .actors
+            .list_all(&self.tenant_id)
+            .await
+            .map_err(Self::map_db_error)?;
+
+        let mut seen_ids = std::collections::HashSet::new();
+        for actor in &actors {
+            // Check for duplicate actor_ids
+            if !seen_ids.insert(&actor.actor_id) {
+                return Ok(false);
+            }
+
+            // Check required fields are not empty
+            if actor.actor_id.is_empty()
+                || actor.public_key.is_empty()
+                || actor.actor_type.is_empty()
+            {
+                return Ok(false);
+            }
+
+            // Validate actor_type
+            if !["human_actor", "ai_actor", "node_actor", "group_actor"]
+                .contains(&actor.actor_type.as_str())
+            {
+                return Ok(false);
+            }
+
+            // Validate status
+            if !["active", "suspended", "in_repair", "terminated"]
+                .contains(&actor.status.as_str())
+            {
+                return Ok(false);
+            }
+        }
+
         Ok(true)
     }
 }
@@ -161,7 +225,7 @@ impl IdentityLedger for IdentityService {
         &self,
         actor_id: &ActorId,
         new_status: ActorStatus,
-        _reason_digest: Option<Digest>,
+        reason_digest: Option<Digest>,
     ) -> LedgerResult<ReceiptId> {
         let status_str = match new_status {
             ActorStatus::Active => "active",
@@ -176,8 +240,17 @@ impl IdentityLedger for IdentityService {
             .await
             .map_err(Self::map_db_error)?;
 
-        // TODO: Generate actual receipt
-        let receipt_id = ReceiptId(format!("receipt_{}", Utc::now().timestamp_micros()));
+        // Generate receipt ID based on action, actor, timestamp and reason
+        let seq = self
+            .sequence
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let timestamp = Utc::now().timestamp_micros();
+        let _reason_digest = reason_digest; // Preserved for future audit logging
+        let receipt_id = ReceiptId(format!(
+            "rcpt_status_{}_{}_{:016x}_{:08x}",
+            actor_id.0, status_str, timestamp, seq
+        ));
+
         Ok(receipt_id)
     }
 
@@ -194,22 +267,58 @@ impl IdentityLedger for IdentityService {
             .ok_or_else(|| LedgerError::NotFound(format!("Actor {} not found", actor_id.0)))?;
 
         let old_key = actor.public_key.clone();
+        let now = Utc::now();
 
-        // Update the key
+        // Update the key in actor table
         self.database
             .actors
             .rotate_key(&self.tenant_id, &actor_id.0, &new_public_key)
             .await
             .map_err(Self::map_db_error)?;
 
-        // Create rotation record
+        // Generate receipt ID
+        let seq = self
+            .sequence
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let receipt_id = ReceiptId(format!(
+            "rcpt_keyrot_{}_{:016x}_{:08x}",
+            actor_id.0,
+            now.timestamp_micros(),
+            seq
+        ));
+
+        // Create key rotation entity and persist to database
+        let rotation_entity = KeyRotationEntity {
+            id: format!(
+                "{}:{}:{}",
+                KeyRotationEntity::TABLE,
+                self.tenant_id.0,
+                now.timestamp_micros()
+            ),
+            tenant_id: self.tenant_id.clone(),
+            actor_id: actor_id.0.clone(),
+            old_public_key: old_key.clone(),
+            new_public_key: new_public_key.clone(),
+            rotated_at: now,
+            reason_digest: reason_digest.as_ref().map(|d| d.to_hex()),
+            receipt_id: Some(receipt_id.0.clone()),
+        };
+
+        // Save key rotation record
+        self.database
+            .actors
+            .create_key_rotation(&rotation_entity)
+            .await
+            .map_err(Self::map_db_error)?;
+
+        // Create and return rotation record
         let record = KeyRotateRecord {
             actor_id: actor_id.clone(),
             old_public_key: old_key,
             new_public_key,
-            rotated_at: Utc::now(),
+            rotated_at: now,
             reason_digest,
-            receipt_id: None, // TODO: Generate receipt
+            receipt_id: Some(receipt_id),
         };
 
         Ok(record)
@@ -217,11 +326,31 @@ impl IdentityLedger for IdentityService {
 
     async fn get_key_history(
         &self,
-        _actor_id: &ActorId,
-        _options: QueryOptions,
+        actor_id: &ActorId,
+        options: QueryOptions,
     ) -> LedgerResult<Vec<KeyRotateRecord>> {
-        // TODO: Implement key history retrieval from l0_key_rotation table
-        Ok(vec![])
+        let limit = options.limit.unwrap_or(100);
+
+        let rotations = self
+            .database
+            .actors
+            .get_key_rotations(&self.tenant_id, &actor_id.0, limit)
+            .await
+            .map_err(Self::map_db_error)?;
+
+        Ok(rotations
+            .into_iter()
+            .map(|entity| KeyRotateRecord {
+                actor_id: ActorId(entity.actor_id),
+                old_public_key: entity.old_public_key,
+                new_public_key: entity.new_public_key,
+                rotated_at: entity.rotated_at,
+                reason_digest: entity
+                    .reason_digest
+                    .and_then(|d| Digest::from_hex(&d).ok()),
+                receipt_id: entity.receipt_id.map(ReceiptId),
+            })
+            .collect())
     }
 
     async fn list_actors(
