@@ -108,7 +108,7 @@ pub async fn verify_consent(
     Ok(Json(VerifyConsentResponse {
         valid: result.valid,
         consent_ref: result.consent_ref,
-        reason: result.reason,
+        reason: if result.reason.is_empty() { None } else { Some(result.reason) },
     }))
 }
 

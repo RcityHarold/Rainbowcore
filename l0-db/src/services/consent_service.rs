@@ -791,21 +791,22 @@ impl ConsentLedger for ConsentService {
         match result {
             Some(entity) => {
                 let has_action = entity.actions.contains(&action.to_string());
-                Ok(ConsentVerifyResult {
-                    valid: has_action,
-                    consent_ref: Some(entity.consent_id),
-                    reason: if !has_action {
-                        Some(format!("Action '{}' not in allowed actions", action))
-                    } else {
-                        None
-                    },
-                })
+                if has_action {
+                    Ok(ConsentVerifyResult::success(
+                        entity.consent_id,
+                        l0_core::types::EvidenceLevel::A,
+                    ))
+                } else {
+                    Ok(ConsentVerifyResult {
+                        valid: false,
+                        consent_ref: Some(entity.consent_id),
+                        reason: format!("Action '{}' not in allowed actions", action),
+                        scope_matches: false,
+                        ..Default::default()
+                    })
+                }
             }
-            None => Ok(ConsentVerifyResult {
-                valid: false,
-                consent_ref: None,
-                reason: Some("No active consent found".to_string()),
-            }),
+            None => Ok(ConsentVerifyResult::failure("No active consent found")),
         }
     }
 

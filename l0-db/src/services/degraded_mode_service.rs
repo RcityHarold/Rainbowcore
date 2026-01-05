@@ -148,9 +148,12 @@ impl DegradedModeService {
         {
             let mut events = self.events.write().unwrap();
             events.push(event.clone());
-            // Keep only last 1000 events
-            if events.len() > 1000 {
-                events.drain(0..100);
+            // Keep only last 1000 events, but drain to 800 to avoid frequent draining
+            const MAX_EVENTS: usize = 1000;
+            const TARGET_EVENTS: usize = 800;
+            if events.len() > MAX_EVENTS {
+                let drain_count = events.len() - TARGET_EVENTS;
+                events.drain(0..drain_count);
             }
         }
 
@@ -163,11 +166,16 @@ impl DegradedModeService {
         })?;
 
         let event_id = event.event_id.clone();
-        let event_type = serde_json::to_string(&event.event_type).unwrap_or_default();
-        let previous_mode = serde_json::to_string(&event.previous_mode).unwrap_or_default();
-        let new_mode = serde_json::to_string(&event.new_mode).unwrap_or_default();
-        let reasons = serde_json::to_string(&event.reasons).unwrap_or_default();
-        let level = serde_json::to_string(&event.level).unwrap_or_default();
+        let event_type = serde_json::to_string(&event.event_type)
+            .map_err(|e| LedgerError::Serialization(format!("Failed to serialize event_type: {}", e)))?;
+        let previous_mode = serde_json::to_string(&event.previous_mode)
+            .map_err(|e| LedgerError::Serialization(format!("Failed to serialize previous_mode: {}", e)))?;
+        let new_mode = serde_json::to_string(&event.new_mode)
+            .map_err(|e| LedgerError::Serialization(format!("Failed to serialize new_mode: {}", e)))?;
+        let reasons = serde_json::to_string(&event.reasons)
+            .map_err(|e| LedgerError::Serialization(format!("Failed to serialize reasons: {}", e)))?;
+        let level = serde_json::to_string(&event.level)
+            .map_err(|e| LedgerError::Serialization(format!("Failed to serialize level: {}", e)))?;
         let timestamp = event.timestamp.to_rfc3339();
         let epoch = event.epoch;
         let triggered_by = event.triggered_by.as_ref().map(|a| a.0.clone());
@@ -215,12 +223,14 @@ impl DegradedModeService {
         })?;
 
         let action_id = action.action_id.clone();
-        let action_type = serde_json::to_string(&action.action_type).unwrap_or_default();
+        let action_type = serde_json::to_string(&action.action_type)
+            .map_err(|e| LedgerError::Serialization(format!("Failed to serialize action_type: {}", e)))?;
         let initiated_by = action.initiated_by.0.clone();
         let target = action.target.clone();
         let initiated_at = action.initiated_at.to_rfc3339();
         let completed_at = action.completed_at.map(|d| d.to_rfc3339());
-        let status = serde_json::to_string(&action.status).unwrap_or_default();
+        let status = serde_json::to_string(&action.status)
+            .map_err(|e| LedgerError::Serialization(format!("Failed to serialize status: {}", e)))?;
         let result = action.result.clone();
 
         let _: Option<RecoveryAction> = session
@@ -301,20 +311,24 @@ impl DegradedModeLedger for DegradedModeService {
             let event = if new_mode != previous_mode {
                 status.mode = new_mode;
 
-                let event_type = if new_mode > previous_mode {
-                    // Getting worse
-                    if new_mode == OperationalMode::Normal {
-                        DegradedEventType::Exited
-                    } else {
-                        DegradedEventType::Escalated
-                    }
+                // Determine event type based on mode transition
+                // OperationalMode order: Normal < Warning < Degraded < Emergency < Halted < Recovery
+                // Higher values indicate worse conditions (except Recovery which is special)
+                let event_type = if new_mode == OperationalMode::Normal {
+                    // Returning to normal - always an exit event
+                    DegradedEventType::Exited
+                } else if previous_mode == OperationalMode::Normal {
+                    // Leaving normal state - entering degraded conditions
+                    DegradedEventType::Entered
+                } else if new_mode == OperationalMode::Recovery {
+                    // Entering recovery mode
+                    DegradedEventType::AutoRecovery
+                } else if new_mode > previous_mode {
+                    // Getting worse (higher severity)
+                    DegradedEventType::Escalated
                 } else {
-                    // Getting better
-                    if new_mode == OperationalMode::Normal {
-                        DegradedEventType::Exited
-                    } else {
-                        DegradedEventType::DeEscalated
-                    }
+                    // Getting better (lower severity) but not yet normal
+                    DegradedEventType::DeEscalated
                 };
 
                 status.status_message = match new_mode {

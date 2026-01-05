@@ -50,6 +50,9 @@ pub enum LedgerError {
     #[error("Storage error: {0}")]
     Storage(String),
 
+    #[error("Serialization error: {0}")]
+    Serialization(String),
+
     #[error("Validation error: {0}")]
     Validation(String),
 
@@ -61,6 +64,9 @@ pub enum LedgerError {
 
     #[error("Merkle proof invalid: {0}")]
     MerkleProofInvalid(String),
+
+    #[error("Concurrency error: {0}")]
+    Concurrency(String),
 }
 
 /// Result type alias for L0 operations

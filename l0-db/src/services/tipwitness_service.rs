@@ -184,16 +184,27 @@ impl TipWitnessService {
         let mut is_valid = true;
 
         // Check for gaps in sequence
+        // Note: history is in reverse order (newest first, oldest last)
+        // So history[i-1] is newer than history[i]
         for i in 1..history.len() {
-            let prev = &history[i]; // Note: history is in reverse order (newest first)
-            let curr = &history[i - 1];
+            let older = &history[i];      // Older record (lower index = newer, higher index = older)
+            let newer = &history[i - 1];  // Newer record
 
-            if prev.local_sequence_no > curr.local_sequence_no {
+            // Newer records should have strictly greater sequence numbers
+            // If newer.sequence <= older.sequence, there's a problem
+            if newer.local_sequence_no <= older.local_sequence_no {
                 is_valid = false;
                 gaps.push(TipWitnessGap {
-                    from_sequence: curr.local_sequence_no,
-                    to_sequence: prev.local_sequence_no,
+                    from_sequence: older.local_sequence_no,
+                    to_sequence: newer.local_sequence_no,
                     gap_type: "sequence_violation".to_string(),
+                });
+            } else if newer.local_sequence_no > older.local_sequence_no + 1 {
+                // Check for missing sequence numbers (gap)
+                gaps.push(TipWitnessGap {
+                    from_sequence: older.local_sequence_no,
+                    to_sequence: newer.local_sequence_no,
+                    gap_type: "sequence_gap".to_string(),
                 });
             }
         }

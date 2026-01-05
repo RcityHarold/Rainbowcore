@@ -171,7 +171,7 @@ impl SignerSetService {
         }
 
         // Too many slashing events -> Demoted
-        if signer.slashing_count + 1 >= 3 {
+        if signer.slashing_count + 1 >= policy.max_slashing_events_before_demotion {
             return SignerStatus::Demoted;
         }
 
@@ -186,7 +186,8 @@ impl SignerSetService {
 
         let signer_id = signer.signer_id.0.clone();
         let public_key = signer.public_key.clone();
-        let status = serde_json::to_string(&signer.status).unwrap_or_default();
+        let status = serde_json::to_string(&signer.status)
+            .map_err(|e| LedgerError::Serialization(format!("Failed to serialize status: {}", e)))?;
         let reputation_score = signer.reputation_score;
         let epochs_participated = signer.epochs_participated;
         let missed_signatures = signer.missed_signatures;

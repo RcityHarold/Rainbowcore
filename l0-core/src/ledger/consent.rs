@@ -18,11 +18,74 @@ use crate::types::{
 use super::{Ledger, LedgerResult, QueryOptions};
 
 /// Consent verification result
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConsentVerifyResult {
+    /// Whether the consent is valid for the requested action
     pub valid: bool,
+    /// Reference to the matching consent record
     pub consent_ref: Option<String>,
-    pub reason: Option<String>,
+    /// Primary reason for the verification result
+    pub reason: String,
+    /// All validation errors encountered (for detailed diagnostics)
+    pub errors: Vec<String>,
+    /// Whether the consent has expired
+    pub expired: bool,
+    /// Whether the consent has been revoked
+    pub revoked: bool,
+    /// If superseded, reference to the new consent
+    pub superseded_by: Option<String>,
+    /// Whether the requested action is within the consent scope
+    pub scope_matches: bool,
+    /// Evidence level of the consent (A or B)
+    pub evidence_level: crate::types::EvidenceLevel,
+}
+
+impl Default for ConsentVerifyResult {
+    fn default() -> Self {
+        Self {
+            valid: false,
+            consent_ref: None,
+            reason: "No consent found".to_string(),
+            errors: Vec::new(),
+            expired: false,
+            revoked: false,
+            superseded_by: None,
+            scope_matches: false,
+            evidence_level: crate::types::EvidenceLevel::B,
+        }
+    }
+}
+
+impl ConsentVerifyResult {
+    /// Create a successful verification result
+    pub fn success(consent_ref: String, evidence_level: crate::types::EvidenceLevel) -> Self {
+        Self {
+            valid: true,
+            consent_ref: Some(consent_ref),
+            reason: "Consent verified successfully".to_string(),
+            errors: Vec::new(),
+            expired: false,
+            revoked: false,
+            superseded_by: None,
+            scope_matches: true,
+            evidence_level,
+        }
+    }
+
+    /// Create a failed verification result with a reason
+    pub fn failure(reason: impl Into<String>) -> Self {
+        Self {
+            valid: false,
+            reason: reason.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Add an error to the result
+    pub fn with_error(mut self, error: impl Into<String>) -> Self {
+        self.errors.push(error.into());
+        self
+    }
 }
 
 /// Policy-Consent Ledger trait

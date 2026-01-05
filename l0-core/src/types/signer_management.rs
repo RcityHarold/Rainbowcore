@@ -120,6 +120,8 @@ pub struct SlashingPolicy {
     pub equivocation_slash_bps: u16,
     /// Maximum consecutive misses before suspension
     pub max_consecutive_misses: u32,
+    /// Maximum slashing events before demotion
+    pub max_slashing_events_before_demotion: u32,
     /// Reputation penalty per miss
     pub reputation_penalty_per_miss: u32,
     /// Cooldown period after slashing (seconds)
@@ -136,6 +138,7 @@ impl Default for SlashingPolicy {
             downtime_slash_bps: 100,           // 1%
             equivocation_slash_bps: 10000,     // 100% (full slash)
             max_consecutive_misses: 10,
+            max_slashing_events_before_demotion: 3,  // Demote after 3 slashing events
             reputation_penalty_per_miss: 5,
             slash_cooldown_secs: 3600,         // 1 hour
             min_stake_threshold: 10_000,

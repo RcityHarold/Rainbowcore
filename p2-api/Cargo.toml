@@ -1,0 +1,58 @@
+[package]
+name = "p2-api"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "P2/DSN REST API Layer - HTTP endpoints for encrypted storage operations"
+
+[dependencies]
+# P2 ecosystem
+p2-core = { path = "../p2-core" }
+p2-storage = { path = "../p2-storage" }
+bridge = { path = "../bridge" }
+l0-core = { path = "../l0-core" }
+
+# Soulbase infrastructure
+soulbase-crypto = { workspace = true }
+
+# Web framework
+axum = { version = "0.7", features = ["json", "multipart"] }
+tower = { version = "0.4", features = ["timeout", "limit"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "request-id"] }
+
+# Async
+tokio = { workspace = true, features = ["full"] }
+async-trait = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# UUID
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# Validation
+validator = { version = "0.18", features = ["derive"] }
+
+# Bytes
+bytes = "1.5"
+
+# JWT authentication
+jsonwebtoken = "9.2"
+
+# URL parsing
+url = "2.5"
+
+[dev-dependencies]
+axum-test = "14"
+tempfile = "3.10"

@@ -118,6 +118,11 @@ impl SignedBatchSnapshot {
 }
 
 /// Epoch snapshot for chain anchoring
+///
+/// Note: EpochSnapshot uses `chain_anchor_policy_version` (not `anchor_policy_version`)
+/// because it specifically governs on-chain anchoring behavior (P4).
+/// - `anchor_policy_version`: L0 internal anchoring (MUST/SHOULD/MAY for L0 receipts)
+/// - `chain_anchor_policy_version`: External chain anchoring (epoch_root → BTC/Atomicals)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpochSnapshot {
     pub epoch_id: String,
@@ -128,6 +133,7 @@ pub struct EpochSnapshot {
     pub parent_epoch_root: Option<Digest>,
     pub signer_set_version: String,
     pub canonicalization_version: String,
+    /// Chain-specific anchor policy (different from L0 anchor_policy_version)
     pub chain_anchor_policy_version: String,
     pub threshold_rule: String,
     pub signature_bitmap: Option<String>,

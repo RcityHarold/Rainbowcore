@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    # L0 - Public Reality Ledger
     "l0-core",
     "l0-db",
     "l0-network",
@@ -8,6 +9,11 @@ members = [
     "l0-p4",
     "l0-api",
     "l0-cli",
+    # P2/DSN - Encrypted Permanence Domain
+    "p2-core",
+    "p2-storage",
+    "bridge",
+    "p2-api",
 ]
 
 [workspace.package]
@@ -16,7 +22,7 @@ edition = "2021"
 authors = ["Rainbow City Foundation"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/rainbowcity/rainbowcore"
-description = "RainbowCore - L0 Public Reality Ledger Implementation"
+description = "RainbowCore - L0 Public Reality Ledger & P2/DSN Encrypted Permanence Domain"
 
 [workspace.dependencies]
 # ============================================

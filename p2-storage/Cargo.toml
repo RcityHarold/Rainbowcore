@@ -1,0 +1,47 @@
+[package]
+name = "p2-storage"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "P2/DSN Storage Layer - Backend implementations for encrypted permanence"
+
+[features]
+default = ["local"]
+local = []
+ipfs = []
+s3 = []
+
+[dependencies]
+# P2 core types
+p2-core = { path = "../p2-core" }
+l0-core = { path = "../l0-core" }
+
+# Soulbase infrastructure
+soulbase-crypto = { workspace = true }
+
+# Async
+tokio = { workspace = true, features = ["fs", "io-util"] }
+async-trait = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# UUID
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# Hex encoding
+hex = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.10"

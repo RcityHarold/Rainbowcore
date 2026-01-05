@@ -9,8 +9,9 @@ use l0_core::crypto::IncrementalMerkleTree;
 use l0_core::error::LedgerError;
 use l0_core::ledger::{DisputeLedger, Ledger, LedgerResult, QueryOptions};
 use l0_core::types::{
-    ActorId, AppealRecord, ClawbackRecord, ClawbackStatus, ClawbackType, Digest, DisputePriority,
-    DisputeRecord, DisputeStatus, ReceiptId, RepairCheckpoint, VerdictRecord, VerdictType,
+    ActorId, AppealOutcome, AppealRecord, AppealStatus, ClawbackRecord, ClawbackStatus, ClawbackType,
+    Digest, DisputePriority, DisputeRecord, DisputeStatus, DisputeType, ReceiptId, RepairCheckpoint,
+    RepairCheckpointType, VerdictRecord, VerdictType,
 };
 use soulbase_storage::model::Entity;
 use soulbase_storage::surreal::SurrealDatastore;
@@ -218,6 +219,25 @@ impl DisputeService {
         }
     }
 
+    /// Convert string to AppealStatus with validation
+    fn str_to_appeal_status(s: &str) -> LedgerResult<AppealStatus> {
+        match s {
+            "pending" => Ok(AppealStatus::Pending),
+            "under_review" => Ok(AppealStatus::UnderReview),
+            "accepted" => Ok(AppealStatus::Accepted),
+            "rejected" => Ok(AppealStatus::Rejected),
+            "dismissed" => Ok(AppealStatus::Dismissed),
+            "expired" => Ok(AppealStatus::Expired),
+            // Map legacy DisputeStatus values to closest AppealStatus
+            "filed" => Ok(AppealStatus::Pending),
+            "verdict_issued" | "resolved" => Ok(AppealStatus::Accepted),
+            other => Err(LedgerError::Validation(format!(
+                "Invalid appeal status: '{}'. Expected one of: pending, under_review, accepted, rejected, dismissed, expired",
+                other
+            ))),
+        }
+    }
+
     /// Parse Digest from hex string with proper error handling
     fn parse_digest(hex_str: &str, field_name: &str) -> LedgerResult<Digest> {
         Digest::from_hex(hex_str).map_err(|e| {
@@ -238,10 +258,12 @@ impl DisputeService {
             dispute_id: entity.dispute_id.clone(),
             filed_by: ActorId(entity.filed_by.clone()),
             filed_against: entity.filed_against.iter().map(|s| ActorId(s.clone())).collect(),
+            dispute_type: DisputeType::Other, // Default for legacy records
             priority,
             status,
             subject_commitment_ref: entity.subject_commitment_ref.clone(),
             evidence_digest,
+            reason_digest: None, // Not stored in legacy entity
             filed_at: entity.filed_at,
             last_updated: entity.last_updated,
             receipt_id: entity.receipt_id.as_ref().map(|r| ReceiptId(r.clone())),
@@ -266,6 +288,9 @@ impl DisputeService {
             verdict_digest,
             rationale_digest,
             remedies_digest,
+            responsibility_shares_digest: None, // Not stored in legacy entity
+            violation_findings_digest: None,    // Not stored in legacy entity
+            sanctions_digest: None,             // Not stored in legacy entity
             issued_by: entity.issued_by.clone(),
             issued_at: entity.issued_at,
             effective_at: entity.effective_at,
@@ -309,9 +334,12 @@ impl DisputeService {
             checkpoint_id: entity.checkpoint_id.clone(),
             dispute_id: entity.dispute_id.clone(),
             verdict_id: entity.verdict_id.clone(),
+            checkpoint_type: RepairCheckpointType::InRepairStart, // Default for legacy records
             checkpoint_digest,
             affected_actors: entity.affected_actors.iter().map(|s| ActorId(s.clone())).collect(),
             repair_plan_digest,
+            expected_outcome_digest: None, // Not stored in legacy entity
+            current_status_digest: None,   // Not stored in legacy entity
             progress_percent: entity.progress_percent,
             created_at: entity.created_at,
             completed_at: entity.completed_at,
@@ -322,7 +350,7 @@ impl DisputeService {
     /// Convert entity to AppealRecord with validation
     fn entity_to_appeal(entity: &AppealEntity) -> LedgerResult<AppealRecord> {
         let grounds_digest = Self::parse_digest(&entity.grounds_digest, "grounds")?;
-        let status = Self::str_to_status(&entity.status)?;
+        let status = Self::str_to_appeal_status(&entity.status)?;
 
         let new_evidence_digest = match &entity.new_evidence_digest {
             Some(d) => Some(Self::parse_digest(d, "new_evidence")?),
@@ -337,6 +365,8 @@ impl DisputeService {
             new_evidence_digest,
             filed_at: entity.filed_at,
             status,
+            appeal_outcome: None,              // Not stored in legacy entity
+            appellate_decision_digest: None,   // Not stored in legacy entity
             receipt_id: entity.receipt_id.as_ref().map(|r| ReceiptId(r.clone())),
         })
     }

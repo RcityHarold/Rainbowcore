@@ -371,8 +371,8 @@ pub async fn handle_consent_command(
                 }
             } else {
                 println!("Consent verification: INVALID or NOT FOUND");
-                if let Some(reason) = result.reason {
-                    println!("  Reason: {}", reason);
+                if !result.reason.is_empty() {
+                    println!("  Reason: {}", result.reason);
                 }
             }
         }

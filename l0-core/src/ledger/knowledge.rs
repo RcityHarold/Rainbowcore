@@ -8,13 +8,15 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use crate::types::{
     Digest, ReceiptId, ActorId, SpaceId, AnchoringState, EvidenceLevel,
 };
 use super::{Ledger, LedgerResult, QueryOptions};
 
 /// Knowledge index entry type
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum IndexEntryType {
     ContentDigest,
     RelationDigest,
@@ -22,8 +24,14 @@ pub enum IndexEntryType {
     SceneDigest,
 }
 
+impl Default for IndexEntryType {
+    fn default() -> Self {
+        Self::ContentDigest
+    }
+}
+
 /// Knowledge index entry
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeIndexEntry {
     pub entry_id: String,
     pub entry_type: IndexEntryType,
@@ -38,7 +46,7 @@ pub struct KnowledgeIndexEntry {
 }
 
 /// Cross-reference record
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrossReference {
     pub ref_id: String,
     pub source_digest: Digest,
