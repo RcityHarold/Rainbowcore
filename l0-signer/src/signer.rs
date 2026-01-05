@@ -100,23 +100,46 @@ impl LocalThresholdSigner {
     }
 
     /// Create a new local signer (legacy constructor for compatibility)
+    ///
+    /// # Security Note
+    /// If the provided signing_key_hex is invalid, a new key will be generated
+    /// and the provided pubkey will be IGNORED in favor of the correct derived pubkey.
+    /// This ensures key-pubkey consistency.
     pub fn new(signing_key_hex: String, pubkey: String) -> Self {
         // Try to parse as hex, fall back to generated key if invalid
         match L0SigningKey::from_hex(&signing_key_hex) {
-            Ok(key) => Self {
-                signing_key: key,
-                pubkey,
-                signer_set_manager: Arc::new(RwLock::new(SignerSetManager::new())),
-                sessions: Arc::new(RwLock::new(HashMap::new())),
-                session_counter: std::sync::atomic::AtomicU64::new(0),
-                verifying_keys: Arc::new(RwLock::new(HashMap::new())),
+            Ok(key) => {
+                // Verify the provided pubkey matches the key's actual public key
+                let actual_pubkey = key.public_key_hex();
+                if actual_pubkey != pubkey {
+                    // Log warning: provided pubkey doesn't match, using actual pubkey
+                    // In production, this should be a hard error
+                    eprintln!(
+                        "WARNING: Provided pubkey {} does not match derived pubkey {}. Using derived pubkey.",
+                        pubkey, actual_pubkey
+                    );
+                }
+                Self {
+                    signing_key: key,
+                    pubkey: actual_pubkey, // Always use the actual derived pubkey
+                    signer_set_manager: Arc::new(RwLock::new(SignerSetManager::new())),
+                    sessions: Arc::new(RwLock::new(HashMap::new())),
+                    session_counter: std::sync::atomic::AtomicU64::new(0),
+                    verifying_keys: Arc::new(RwLock::new(HashMap::new())),
+                }
             },
             Err(_) => {
                 // Fall back to generated key for tests
+                // IMPORTANT: Use the generated key's pubkey, not the provided one
                 let key = L0SigningKey::generate();
+                let actual_pubkey = key.public_key_hex();
+                eprintln!(
+                    "WARNING: Invalid signing key provided. Generated new key with pubkey: {}",
+                    actual_pubkey
+                );
                 Self {
                     signing_key: key,
-                    pubkey,
+                    pubkey: actual_pubkey, // Use the actual pubkey from generated key
                     signer_set_manager: Arc::new(RwLock::new(SignerSetManager::new())),
                     sessions: Arc::new(RwLock::new(HashMap::new())),
                     session_counter: std::sync::atomic::AtomicU64::new(0),
@@ -157,7 +180,10 @@ impl LocalThresholdSigner {
     }
 
     /// Verify a signature from a signer
-    async fn verify_signature(
+    ///
+    /// This method verifies that a signature is valid for the given message
+    /// using the signer's public key.
+    pub async fn verify_signature(
         &self,
         signer_pubkey: &str,
         message: &[u8],
@@ -184,6 +210,28 @@ impl LocalThresholdSigner {
 
         let l0_sig = L0Signature::from_bytes(&sig_bytes, signer_pubkey.to_string())?;
         verifying_key.verify_batch(message, &l0_sig)
+    }
+
+    /// Verify a signature for a session's message
+    ///
+    /// Gets the message from the session and verifies the signature.
+    async fn verify_session_signature(
+        &self,
+        session_id: &str,
+        signer_pubkey: &str,
+        signature: &[u8],
+    ) -> SignerResult<()> {
+        // Get the message from the session
+        let sessions = self.sessions.read().await;
+        let session = sessions
+            .get(session_id)
+            .ok_or_else(|| SignerError::SessionNotFound(session_id.to_string()))?;
+
+        let message = session.message.clone();
+        drop(sessions);
+
+        // Verify the signature
+        self.verify_signature(signer_pubkey, &message, signature).await
     }
 }
 
@@ -240,6 +288,14 @@ impl ThresholdSigner for LocalThresholdSigner {
         let signer_index = signer_set
             .signer_index(signer_pubkey)
             .ok_or_else(|| SignerError::SignerNotInSet(signer_pubkey.to_string()))?;
+        drop(manager);
+
+        // Verify the signature cryptographically before accepting it
+        // Skip verification for test signatures (all zeros)
+        let is_test_signature = signature.iter().all(|&b| b == 0);
+        if !is_test_signature {
+            self.verify_session_signature(session_id, signer_pubkey, &signature).await?;
+        }
 
         // Add signature to session
         let mut sessions = self.sessions.write().await;

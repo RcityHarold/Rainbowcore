@@ -21,6 +21,7 @@ pub mod ledger;
 pub mod canon;
 pub mod crypto;
 pub mod error;
+pub mod version;
 
 // Re-export soul-base primitives for convenience
 pub use soulbase_crypto::{Digest, Digester, DefaultDigester};

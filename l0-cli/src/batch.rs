@@ -8,6 +8,7 @@ use std::path::Path;
 
 /// Batch operation configuration
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct BatchConfig {
     /// Continue on error
     pub continue_on_error: bool,
@@ -43,6 +44,7 @@ pub struct BatchOperation {
     pub depends_on: Option<usize>,
 }
 
+#[allow(dead_code)]
 impl BatchOperation {
     /// Create a new batch operation
     pub fn new(command: String, args: Vec<String>) -> Self {
@@ -76,6 +78,7 @@ impl BatchOperation {
 
 /// Result of a batch operation
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct BatchOperationResult {
     /// Operation index
     pub index: usize,
@@ -135,6 +138,7 @@ impl BatchResult {
     }
 
     /// Check if all operations succeeded
+    #[allow(dead_code)]
     pub fn all_succeeded(&self) -> bool {
         self.failed == 0 && self.skipped == 0
     }

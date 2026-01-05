@@ -55,7 +55,8 @@ impl Default for TcpTransportConfig {
     }
 }
 
-/// Connection to a peer
+/// Connection to a peer (reserved for future connection pooling enhancements)
+#[allow(dead_code)]
 struct PeerConnection {
     stream: TcpStream,
     node_id: NodeId,
@@ -169,7 +170,7 @@ impl TcpTransport {
     /// Handle an incoming connection
     async fn handle_connection(
         mut stream: TcpStream,
-        address: String,
+        _address: String,
         connections: Arc<RwLock<HashMap<NodeId, Arc<RwLock<TcpStream>>>>>,
         node_manager: Arc<NodeManager>,
         message_tx: mpsc::Sender<(NodeId, L0Message)>,
@@ -421,7 +422,7 @@ pub struct NodeDiscovery {
     /// Bootstrap nodes
     bootstrap_nodes: Vec<String>,
     /// Discovery interval in seconds
-    discovery_interval_secs: u64,
+    pub discovery_interval_secs: u64,
 }
 
 impl NodeDiscovery {

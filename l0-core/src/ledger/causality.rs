@@ -94,4 +94,11 @@ pub trait CausalityLedger: Ledger {
         &self,
         commitment_ids: &[String],
     ) -> LedgerResult<Digest>;
+
+    /// Count commitments in an actor's chain (for pagination)
+    async fn count_commitment_chain(
+        &self,
+        actor_id: &ActorId,
+        scope_type: Option<ScopeType>,
+    ) -> LedgerResult<u64>;
 }

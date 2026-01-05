@@ -31,13 +31,16 @@ pub mod entities;
 pub mod error;
 pub mod repos;
 pub mod schema;
+pub mod sequence;
 pub mod services;
+pub mod validation;
 
 // Re-export main types
 pub use entities::*;
 pub use error::*;
 pub use repos::*;
 pub use schema::L0_SCHEMA;
+pub use sequence::{PersistentSequence, SequenceManager};
 pub use services::{
     AnchorService, BackfillService, CausalityService, ConsentService, DisputeService,
     IdentityService, KnowledgeService, ReceiptService, TipWitnessChainVerification,

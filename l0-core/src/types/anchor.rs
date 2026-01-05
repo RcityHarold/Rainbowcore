@@ -9,24 +9,33 @@ use serde::{Deserialize, Serialize};
 use super::common::Digest;
 
 /// Supported anchor chain types
+///
+/// According to L0 development documentation (Chapter 7 & 8),
+/// the chain anchoring target is locked to **Bitcoin + Atomicals**.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AnchorChainType {
-    /// Ethereum mainnet
-    Ethereum,
-    /// Bitcoin mainnet
+    /// Bitcoin mainnet (primary target per L0 spec)
     Bitcoin,
-    /// Polygon (Ethereum L2)
-    Polygon,
-    /// Solana
-    Solana,
-    /// Internal L0 only (no external anchor)
+    /// Atomicals protocol on Bitcoin (primary extension per L0 spec)
+    Atomicals,
+    /// Internal L0 only (no external anchor, for testing/development)
     Internal,
+    /// Ethereum mainnet (legacy/future consideration)
+    #[serde(rename = "ethereum")]
+    Ethereum,
+    /// Polygon (legacy/future consideration)
+    #[serde(rename = "polygon")]
+    Polygon,
+    /// Solana (legacy/future consideration)
+    #[serde(rename = "solana")]
+    Solana,
 }
 
 impl Default for AnchorChainType {
     fn default() -> Self {
-        Self::Internal
+        // Bitcoin is the primary anchor target per L0 documentation
+        Self::Bitcoin
     }
 }
 
@@ -118,11 +127,12 @@ impl AnchorTransaction {
             block_hash: None,
             confirmations: 0,
             required_confirmations: match chain_type {
-                AnchorChainType::Ethereum => 12,
                 AnchorChainType::Bitcoin => 6,
+                AnchorChainType::Atomicals => 6, // Same as Bitcoin (built on BTC)
+                AnchorChainType::Internal => 0,
+                AnchorChainType::Ethereum => 12,
                 AnchorChainType::Polygon => 256,
                 AnchorChainType::Solana => 32,
-                AnchorChainType::Internal => 0,
             },
             gas_price: None,
             gas_used: None,
@@ -254,15 +264,19 @@ pub struct AnchorPolicy {
 impl Default for AnchorPolicy {
     fn default() -> Self {
         let mut min_confirmations = std::collections::HashMap::new();
-        min_confirmations.insert("ethereum".to_string(), 12);
+        // Primary targets per L0 documentation
         min_confirmations.insert("bitcoin".to_string(), 6);
+        min_confirmations.insert("atomicals".to_string(), 6);
+        // Legacy/future chains
+        min_confirmations.insert("ethereum".to_string(), 12);
         min_confirmations.insert("polygon".to_string(), 256);
         min_confirmations.insert("solana".to_string(), 32);
 
         Self {
             version: "v1.0.0".to_string(),
-            enabled_chains: vec![AnchorChainType::Internal],
-            primary_chain: AnchorChainType::Internal,
+            // Bitcoin + Atomicals are the primary targets per L0 spec
+            enabled_chains: vec![AnchorChainType::Bitcoin, AnchorChainType::Atomicals],
+            primary_chain: AnchorChainType::Bitcoin,
             epoch_interval: 100,
             max_anchor_delay: 3600,
             retry_count: 3,
@@ -284,6 +298,29 @@ pub enum GasStrategy {
     Slow,
     /// Custom gas price
     Custom,
+}
+
+/// Anchor priority level (per L0 spec Chapter 8)
+///
+/// Note: ChainAnchorInput and ChainAnchorLink are defined in snapshot.rs
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnchorPriority {
+    /// Must anchor - VerdictBatch, REVOKED, major RepairCheckpoint
+    /// Paid by public budget (Foundation/DAO)
+    Must,
+    /// Should anchor - high-risk ConsentBatch, critical SelfOnset
+    /// Paid by public budget + Actor/Node optional
+    Should,
+    /// May anchor - normal logs, normal narratives
+    /// Paid by Actor/Node self-funding
+    May,
+}
+
+impl Default for AnchorPriority {
+    fn default() -> Self {
+        Self::May
+    }
 }
 
 #[cfg(test)]
@@ -367,8 +404,31 @@ mod tests {
     fn test_anchor_policy_default() {
         let policy = AnchorPolicy::default();
 
-        assert_eq!(policy.primary_chain, AnchorChainType::Internal);
+        // Bitcoin is the primary chain per L0 documentation
+        assert_eq!(policy.primary_chain, AnchorChainType::Bitcoin);
         assert_eq!(policy.epoch_interval, 100);
-        assert!(policy.min_confirmations.contains_key("ethereum"));
+        assert!(policy.min_confirmations.contains_key("bitcoin"));
+        assert!(policy.min_confirmations.contains_key("atomicals"));
+        assert_eq!(*policy.min_confirmations.get("bitcoin").unwrap(), 6);
+    }
+
+    #[test]
+    fn test_anchor_chain_type_default() {
+        // Bitcoin is the default per L0 documentation
+        assert_eq!(AnchorChainType::default(), AnchorChainType::Bitcoin);
+    }
+
+    #[test]
+    fn test_anchor_priority_default() {
+        // MAY is the default priority
+        assert_eq!(AnchorPriority::default(), AnchorPriority::May);
+    }
+
+    #[test]
+    fn test_atomicals_chain_type() {
+        // Atomicals is a valid chain type
+        let chain = AnchorChainType::Atomicals;
+        assert_ne!(chain, AnchorChainType::Bitcoin);
+        assert_ne!(chain, AnchorChainType::Internal);
     }
 }

@@ -9,6 +9,10 @@ use l0_core::ledger::{CausalityLedger, CommitmentRecord, Ledger, LedgerResult, Q
 use l0_core::types::{
     ActorId, Digest, EpochSnapshot, L0Receipt, ReceiptId, RootKind, ScopeType, SignedBatchSnapshot,
 };
+use l0_core::version::versions::{
+    CANONICALIZATION_VERSION, FEE_SCHEDULE_VERSION, ANCHOR_POLICY_VERSION,
+    SIGNER_SET_VERSION, THRESHOLD_RULE,
+};
 use l0_core::crypto::IncrementalMerkleTree;
 use soulbase_types::prelude::TenantId;
 use std::sync::Arc;
@@ -108,15 +112,26 @@ impl CausalityService {
         }
     }
 
+    /// Parse Digest from hex string with proper error handling
+    fn parse_digest(hex_str: &str, field_name: &str) -> LedgerResult<Digest> {
+        Digest::from_hex(hex_str).map_err(|e| {
+            LedgerError::Validation(format!(
+                "Invalid {} digest '{}': {}",
+                field_name, hex_str, e
+            ))
+        })
+    }
+
     /// Convert CommitmentEntity to CommitmentRecord
     fn entity_to_record(entity: &CommitmentEntity) -> LedgerResult<CommitmentRecord> {
         let scope_type = Self::str_to_scope_type(&entity.scope_type)?;
+        let commitment_digest = Self::parse_digest(&entity.commitment_digest, "commitment")?;
 
         Ok(CommitmentRecord {
             commitment_id: entity.commitment_id.clone(),
             actor_id: ActorId(entity.actor_id.clone()),
             scope_type,
-            commitment_digest: Digest::from_hex(&entity.commitment_digest).unwrap_or_default(),
+            commitment_digest,
             parent_commitment_ref: entity.parent_commitment_ref.clone(),
             sequence_no: entity.sequence_no,
             created_at: entity.created_at,
@@ -169,8 +184,8 @@ impl CausalityService {
             time_window_end: now,
             parent_batch_root: parent_root,
             commitment_count: count as u64,
-            signer_set_version: "v1".to_string(),
-            threshold_rule: "5/9".to_string(),
+            signer_set_version: SIGNER_SET_VERSION.to_string(),
+            threshold_rule: THRESHOLD_RULE.to_string(),
             signature_bitmap: String::new(),
             threshold_proof: String::new(),
             created_at: now,
@@ -187,6 +202,65 @@ impl CausalityService {
         *tree = IncrementalMerkleTree::new();
 
         Ok(created)
+    }
+
+    /// Update batch snapshot with threshold signature data
+    ///
+    /// This method should be called after the batch has been signed by the
+    /// required threshold of signers. It updates the signature_bitmap and
+    /// threshold_proof fields in the batch snapshot.
+    ///
+    /// # Arguments
+    /// * `batch_sequence_no` - The sequence number of the batch to update
+    /// * `signature_bitmap` - Bitmap indicating which signers participated
+    /// * `threshold_proof` - The aggregated threshold signature proof
+    ///
+    /// # Example
+    /// ```ignore
+    /// // After collecting threshold signatures
+    /// causality_service.update_batch_signature(
+    ///     batch_seq,
+    ///     "0b111110000", // 5 of 9 signers
+    ///     &hex::encode(aggregated_signature),
+    /// ).await?;
+    /// ```
+    pub async fn update_batch_signature(
+        &self,
+        batch_sequence_no: u64,
+        signature_bitmap: &str,
+        threshold_proof: &str,
+    ) -> LedgerResult<()> {
+        self.database
+            .commitments
+            .update_batch_signature(
+                &self.tenant_id,
+                batch_sequence_no,
+                signature_bitmap,
+                threshold_proof,
+            )
+            .await
+            .map_err(Self::map_db_error)
+    }
+
+    /// Get unsigned batches that need signing
+    ///
+    /// Returns batch snapshot entities that have empty signature fields,
+    /// indicating they need to go through the threshold signing process.
+    pub async fn get_unsigned_batches(&self, limit: u32) -> LedgerResult<Vec<BatchSnapshotEntity>> {
+        let entities = self
+            .database
+            .commitments
+            .list_batch_snapshots(&self.tenant_id, limit)
+            .await
+            .map_err(Self::map_db_error)?;
+
+        // Filter for unsigned batches (empty signature fields)
+        let unsigned: Vec<BatchSnapshotEntity> = entities
+            .into_iter()
+            .filter(|e| e.signature_bitmap.is_empty() || e.threshold_proof.is_empty())
+            .collect();
+
+        Ok(unsigned)
     }
 }
 
@@ -474,9 +548,9 @@ impl CausalityLedger for CausalityService {
                     batch_sequence_no: e.batch_sequence_no,
                     parent_batch_root: e.parent_batch_root.and_then(|s| Digest::from_hex(&s).ok()),
                     signer_set_version: e.signer_set_version,
-                    canonicalization_version: "v1".to_string(),
-                    anchor_policy_version: "v1".to_string(),
-                    fee_schedule_version: "v1".to_string(),
+                    canonicalization_version: CANONICALIZATION_VERSION.to_string(),
+                    anchor_policy_version: ANCHOR_POLICY_VERSION.to_string(),
+                    fee_schedule_version: FEE_SCHEDULE_VERSION.to_string(),
                     threshold_rule: e.threshold_rule,
                     signature_bitmap: e.signature_bitmap,
                     threshold_proof: e.threshold_proof,
@@ -502,6 +576,14 @@ impl CausalityLedger for CausalityService {
             batch_start: 0, // Not tracked in EpochSnapshot directly
             batch_end: 0,
             parent_epoch_root: snapshot.parent_epoch_root.map(|d| d.to_hex()),
+            signer_set_version: snapshot.signer_set_version.clone(),
+            canonicalization_version: snapshot.canonicalization_version.clone(),
+            chain_anchor_policy_version: snapshot.chain_anchor_policy_version.clone(),
+            threshold_rule: snapshot.threshold_rule.clone(),
+            signature_bitmap: snapshot.signature_bitmap.clone(),
+            threshold_proof: snapshot.threshold_proof.clone(),
+            gaps_digest: snapshot.gaps_digest.as_ref().map(|d| d.to_hex()),
+            batch_receipts_digest: snapshot.batch_receipts_digest.to_hex(),
             chain_anchor_tx: None,
             anchor_status: "pending".to_string(),
             created_at: Utc::now(),
@@ -529,7 +611,7 @@ impl CausalityLedger for CausalityService {
             signer_set_version: snapshot.signer_set_version,
             canonicalization_version: snapshot.canonicalization_version,
             anchor_policy_version: snapshot.chain_anchor_policy_version,
-            fee_schedule_version: "v1".to_string(),
+            fee_schedule_version: FEE_SCHEDULE_VERSION.to_string(),
             fee_receipt_id: String::new(),
             signed_snapshot_ref: snapshot.epoch_id,
             created_at: Utc::now(),
@@ -556,14 +638,14 @@ impl CausalityLedger for CausalityService {
                     epoch_window_end: e.time_window_end,
                     epoch_sequence_no: e.epoch_sequence_no,
                     parent_epoch_root: e.parent_epoch_root.and_then(|s| Digest::from_hex(&s).ok()),
-                    signer_set_version: "v1".to_string(),
-                    canonicalization_version: "v1".to_string(),
-                    chain_anchor_policy_version: "v1".to_string(),
-                    threshold_rule: "5/9".to_string(),
-                    signature_bitmap: None,
-                    threshold_proof: None,
-                    gaps_digest: None,
-                    batch_receipts_digest: Digest::zero(),
+                    signer_set_version: e.signer_set_version,
+                    canonicalization_version: e.canonicalization_version,
+                    chain_anchor_policy_version: e.chain_anchor_policy_version,
+                    threshold_rule: e.threshold_rule,
+                    signature_bitmap: e.signature_bitmap,
+                    threshold_proof: e.threshold_proof,
+                    gaps_digest: e.gaps_digest.and_then(|s| Digest::from_hex(&s).ok()),
+                    batch_receipts_digest: Digest::from_hex(&e.batch_receipts_digest).unwrap_or_default(),
                 };
                 Ok(Some(snapshot))
             }
@@ -600,5 +682,18 @@ impl CausalityLedger for CausalityService {
         }
 
         Ok(tree.root())
+    }
+
+    async fn count_commitment_chain(
+        &self,
+        actor_id: &ActorId,
+        scope_type: Option<ScopeType>,
+    ) -> LedgerResult<u64> {
+        let scope_str = scope_type.map(Self::scope_type_to_str);
+        self.database
+            .commitments
+            .count_by_actor(&self.tenant_id, &actor_id.0, scope_str)
+            .await
+            .map_err(Self::map_db_error)
     }
 }

@@ -20,6 +20,9 @@ soulbase-crypto = { workspace = true }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 
+# BLS12-381 for threshold signatures
+blst = "0.3"
+
 # Async
 tokio = { workspace = true }
 async-trait = { workspace = true }
@@ -36,3 +39,10 @@ thiserror = { workspace = true }
 # Utilities
 hex = "0.4"
 sha2 = "0.10"
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "signing_benchmarks"
+harness = false

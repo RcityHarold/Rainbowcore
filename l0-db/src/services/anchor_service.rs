@@ -1,6 +1,22 @@
 //! Anchor Service Implementation
 //!
 //! Implements the AnchorLedger trait for managing chain anchoring operations.
+//!
+//! ## P4 Integration
+//!
+//! When compiled with the `p4` feature, this service can use the P4 layer
+//! for real blockchain anchoring. Without the feature, it uses a mock provider.
+//!
+//! ```rust,no_run
+//! use l0_db::services::{AnchorService, P4AnchorProvider};
+//!
+//! // With P4 integration:
+//! #[cfg(feature = "p4")]
+//! async fn example() {
+//!     let provider = P4AnchorProvider::new(p4_config).await.unwrap();
+//!     let service = AnchorService::new_with_provider(datastore, tenant_id, Box::new(provider));
+//! }
+//! ```
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -17,26 +33,118 @@ use soulbase_storage::Datastore;
 use soulbase_types::prelude::TenantId;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tracing::{debug, info, warn};
 
 use crate::entities::{AnchorPolicyEntity, AnchorTransactionEntity};
+use crate::services::p4_integration::{AnchorProvider, MockAnchorProvider};
 
 /// Anchor Service
 ///
 /// Manages the anchoring of L0 epoch roots to external blockchains.
+///
+/// Supports optional P4 layer integration for real blockchain anchoring.
+/// Without a provider, uses simulated transaction hashes.
 pub struct AnchorService {
     datastore: Arc<SurrealDatastore>,
     tenant_id: TenantId,
     sequence: std::sync::atomic::AtomicU64,
+    /// Optional P4 anchor provider for real blockchain integration
+    anchor_provider: Option<Box<dyn AnchorProvider>>,
 }
 
 impl AnchorService {
-    /// Create a new Anchor Service
+    /// Create a new Anchor Service (without P4 provider - uses simulated anchoring)
     pub fn new(datastore: Arc<SurrealDatastore>, tenant_id: TenantId) -> Self {
         Self {
             datastore,
             tenant_id,
             sequence: std::sync::atomic::AtomicU64::new(0),
+            anchor_provider: None,
         }
+    }
+
+    /// Create a new Anchor Service with P4 anchor provider
+    ///
+    /// This enables real blockchain anchoring through the P4 layer.
+    pub fn new_with_provider(
+        datastore: Arc<SurrealDatastore>,
+        tenant_id: TenantId,
+        provider: Box<dyn AnchorProvider>,
+    ) -> Self {
+        Self {
+            datastore,
+            tenant_id,
+            sequence: std::sync::atomic::AtomicU64::new(0),
+            anchor_provider: Some(provider),
+        }
+    }
+
+    /// Create a new Anchor Service with persistent sequence
+    pub async fn new_with_persistence(
+        datastore: Arc<SurrealDatastore>,
+        tenant_id: TenantId,
+    ) -> Result<Self, LedgerError> {
+        let service = Self::new(datastore.clone(), tenant_id.clone());
+        let max_seq = service.load_max_sequence().await?;
+        service
+            .sequence
+            .store(max_seq + 1, std::sync::atomic::Ordering::SeqCst);
+        Ok(service)
+    }
+
+    /// Create with persistence and P4 provider
+    pub async fn new_with_persistence_and_provider(
+        datastore: Arc<SurrealDatastore>,
+        tenant_id: TenantId,
+        provider: Box<dyn AnchorProvider>,
+    ) -> Result<Self, LedgerError> {
+        let mut service = Self::new_with_provider(datastore.clone(), tenant_id.clone(), provider);
+        let max_seq = service.load_max_sequence().await?;
+        service
+            .sequence
+            .store(max_seq + 1, std::sync::atomic::Ordering::SeqCst);
+        Ok(service)
+    }
+
+    /// Set the anchor provider (for late binding)
+    pub fn set_anchor_provider(&mut self, provider: Box<dyn AnchorProvider>) {
+        self.anchor_provider = Some(provider);
+    }
+
+    /// Check if P4 provider is configured
+    pub fn has_provider(&self) -> bool {
+        self.anchor_provider.is_some()
+    }
+
+    /// Load the maximum sequence number from existing records
+    async fn load_max_sequence(&self) -> Result<u64, LedgerError> {
+        let session = self.datastore.session().await.map_err(|e| {
+            LedgerError::Storage(format!("Failed to get session: {}", e))
+        })?;
+
+        let query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant ORDER BY created_at DESC LIMIT 1",
+            AnchorTransactionEntity::TABLE
+        );
+
+        let mut response = session
+            .client()
+            .query(&query)
+            .bind(("tenant", self.tenant_id.clone()))
+            .await
+            .map_err(|e| LedgerError::Storage(format!("Query failed: {}", e)))?;
+
+        let result: Option<AnchorTransactionEntity> = response
+            .take(0)
+            .map_err(|e| LedgerError::Storage(format!("Parse failed: {}", e)))?;
+
+        if let Some(anchor) = result {
+            if let Some(seq) = crate::sequence::extract_sequence_from_id(&anchor.anchor_id) {
+                return Ok(seq);
+            }
+        }
+
+        Ok(0)
     }
 
     /// Generate a new ID
@@ -51,23 +159,26 @@ impl AnchorService {
     /// Convert chain type to string
     fn chain_type_to_str(chain_type: AnchorChainType) -> &'static str {
         match chain_type {
-            AnchorChainType::Ethereum => "ethereum",
             AnchorChainType::Bitcoin => "bitcoin",
+            AnchorChainType::Atomicals => "atomicals",
+            AnchorChainType::Internal => "internal",
+            AnchorChainType::Ethereum => "ethereum",
             AnchorChainType::Polygon => "polygon",
             AnchorChainType::Solana => "solana",
-            AnchorChainType::Internal => "internal",
         }
     }
 
     /// Convert string to chain type
     fn str_to_chain_type(s: &str) -> AnchorChainType {
         match s {
-            "ethereum" => AnchorChainType::Ethereum,
             "bitcoin" => AnchorChainType::Bitcoin,
+            "atomicals" => AnchorChainType::Atomicals,
+            "internal" => AnchorChainType::Internal,
+            "ethereum" => AnchorChainType::Ethereum,
             "polygon" => AnchorChainType::Polygon,
             "solana" => AnchorChainType::Solana,
-            "internal" => AnchorChainType::Internal,
-            _ => AnchorChainType::Internal,
+            // Default to Bitcoin (primary target per L0 spec)
+            _ => AnchorChainType::Bitcoin,
         }
     }
 
@@ -120,11 +231,12 @@ impl AnchorService {
     /// Get required confirmations for a chain type
     fn required_confirmations(chain_type: AnchorChainType) -> u32 {
         match chain_type {
-            AnchorChainType::Ethereum => 12,
             AnchorChainType::Bitcoin => 6,
+            AnchorChainType::Atomicals => 6, // Same as Bitcoin (built on BTC)
+            AnchorChainType::Internal => 0,
+            AnchorChainType::Ethereum => 12,
             AnchorChainType::Polygon => 256,
             AnchorChainType::Solana => 32,
-            AnchorChainType::Internal => 0,
         }
     }
 
@@ -157,8 +269,11 @@ impl AnchorService {
     /// Convert entity to AnchorPolicy
     fn entity_to_policy(entity: &AnchorPolicyEntity) -> AnchorPolicy {
         let mut min_confirmations = HashMap::new();
-        min_confirmations.insert("ethereum".to_string(), entity.min_confirmations_ethereum);
+        // Primary targets per L0 spec
         min_confirmations.insert("bitcoin".to_string(), entity.min_confirmations_bitcoin);
+        min_confirmations.insert("atomicals".to_string(), entity.min_confirmations_bitcoin); // Same as Bitcoin
+        // Legacy chains
+        min_confirmations.insert("ethereum".to_string(), entity.min_confirmations_ethereum);
         min_confirmations.insert("polygon".to_string(), entity.min_confirmations_polygon);
         min_confirmations.insert("solana".to_string(), entity.min_confirmations_solana);
 
@@ -177,6 +292,55 @@ impl AnchorService {
             min_confirmations,
         }
     }
+
+    /// Generate simulated transaction hash (fallback when no P4 provider)
+    fn generate_simulated_tx_hash(&self, anchor: &AnchorTransaction) -> String {
+        match anchor.chain_type {
+            AnchorChainType::Bitcoin | AnchorChainType::Atomicals => {
+                // Bitcoin-style tx hash (32 bytes = 64 hex chars)
+                let epoch_data = format!(
+                    "btc:{}:{}:{}",
+                    anchor.epoch_sequence,
+                    anchor.epoch_root.to_hex(),
+                    anchor.created_at.timestamp()
+                );
+                let hash = Digest::blake3(epoch_data.as_bytes());
+                hash.to_hex()
+            }
+            AnchorChainType::Ethereum | AnchorChainType::Polygon => {
+                // Ethereum-style tx hash (0x prefixed)
+                let epoch_data = format!(
+                    "eth:{}:{}:{}",
+                    anchor.epoch_sequence,
+                    anchor.epoch_root.to_hex(),
+                    anchor.created_at.timestamp()
+                );
+                let hash = Digest::blake3(epoch_data.as_bytes());
+                format!("0x{}", hash.to_hex())
+            }
+            AnchorChainType::Solana => {
+                // Solana-style signature (base58)
+                let epoch_data = format!(
+                    "sol:{}:{}:{}",
+                    anchor.epoch_sequence,
+                    anchor.epoch_root.to_hex(),
+                    anchor.created_at.timestamp()
+                );
+                let hash = Digest::blake3(epoch_data.as_bytes());
+                // Simplified base58-like encoding
+                format!("{}Sol", hash.to_hex())
+            }
+            AnchorChainType::Internal => {
+                // Internal anchoring (immediate confirmation)
+                let epoch_data = format!(
+                    "internal:{}:{}",
+                    anchor.epoch_sequence,
+                    anchor.epoch_root.to_hex()
+                );
+                Digest::blake3(epoch_data.as_bytes()).to_hex()
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -190,10 +354,107 @@ impl Ledger for AnchorService {
     }
 
     async fn current_root(&self) -> LedgerResult<Digest> {
-        Ok(Digest::zero())
+        // Compute Merkle root from all anchor transactions
+        let session = self.datastore.session().await.map_err(|e| {
+            LedgerError::Storage(format!("Failed to get session: {}", e))
+        })?;
+
+        let query = format!(
+            "SELECT epoch_root, epoch_sequence FROM {} WHERE tenant_id = $tenant ORDER BY epoch_sequence ASC",
+            AnchorTransactionEntity::TABLE
+        );
+
+        #[derive(Deserialize)]
+        struct AnchorRoot {
+            epoch_root: String,
+            epoch_sequence: u64,
+        }
+
+        let mut response = session
+            .client()
+            .query(&query)
+            .bind(("tenant", self.tenant_id.clone()))
+            .await
+            .map_err(|e| LedgerError::Storage(format!("Query failed: {}", e)))?;
+
+        let anchors: Vec<AnchorRoot> = response
+            .take(0)
+            .map_err(|e| LedgerError::Storage(format!("Parse failed: {}", e)))?;
+
+        if anchors.is_empty() {
+            return Ok(Digest::zero());
+        }
+
+        // Build Merkle tree from anchor roots
+        use l0_core::crypto::IncrementalMerkleTree;
+        let mut tree = IncrementalMerkleTree::new();
+        for anchor in &anchors {
+            let digest = Digest::from_hex(&anchor.epoch_root).unwrap_or_default();
+            tree.add(digest);
+        }
+
+        Ok(tree.root())
     }
 
     async fn verify_integrity(&self) -> LedgerResult<bool> {
+        // Verify integrity by checking:
+        // 1. All anchors have valid status values
+        // 2. Finalized anchors have tx_hash and block_number
+        // 3. Epoch sequences are unique per chain
+        // 4. Confirmations don't exceed required_confirmations unreasonably
+
+        let session = self.datastore.session().await.map_err(|e| {
+            LedgerError::Storage(format!("Failed to get session: {}", e))
+        })?;
+
+        let query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant",
+            AnchorTransactionEntity::TABLE
+        );
+
+        let mut response = session
+            .client()
+            .query(&query)
+            .bind(("tenant", self.tenant_id.clone()))
+            .await
+            .map_err(|e| LedgerError::Storage(format!("Query failed: {}", e)))?;
+
+        let anchors: Vec<AnchorTransactionEntity> = response
+            .take(0)
+            .map_err(|e| LedgerError::Storage(format!("Parse failed: {}", e)))?;
+
+        let valid_statuses = ["pending", "submitted", "confirmed", "finalized", "failed", "expired"];
+        let mut chain_epochs: HashMap<(String, u64), String> = HashMap::new();
+
+        for anchor in &anchors {
+            // Check valid status
+            if !valid_statuses.contains(&anchor.status.as_str()) {
+                return Ok(false);
+            }
+
+            // Check finalized anchors have required fields
+            if anchor.status == "finalized" {
+                if anchor.tx_hash.is_none() || anchor.block_number.is_none() {
+                    return Ok(false);
+                }
+            }
+
+            // Check for duplicate epoch sequences per chain
+            let key = (anchor.chain_type.clone(), anchor.epoch_sequence);
+            if let Some(existing_id) = chain_epochs.get(&key) {
+                if existing_id != &anchor.anchor_id {
+                    return Ok(false); // Duplicate epoch for same chain
+                }
+            }
+            chain_epochs.insert(key, anchor.anchor_id.clone());
+
+            // Check confirmations are reasonable
+            if anchor.confirmations > anchor.required_confirmations * 100 {
+                // Unreasonably high confirmations might indicate data corruption
+                return Ok(false);
+            }
+        }
+
         Ok(true)
     }
 }
@@ -351,25 +612,73 @@ impl AnchorLedger for AnchorService {
     }
 
     async fn submit_anchor(&self, anchor_id: &str) -> LedgerResult<String> {
-        // In a full implementation, this would:
-        // 1. Build the anchor transaction for the target chain
-        // 2. Sign the transaction
-        // 3. Submit to the chain
-        // 4. Return the tx hash
-
+        // Get the anchor to submit
         let anchor = self
             .get_anchor(anchor_id)
             .await?
             .ok_or_else(|| LedgerError::NotFound(format!("Anchor {} not found", anchor_id)))?;
 
-        // Simulate tx hash generation (use first 32 chars of epoch root hex)
-        let root_hex = anchor.epoch_root.to_hex();
-        let tx_hash = format!("0x{}", &root_hex[..32.min(root_hex.len())]);
+        // Validate anchor is in correct state for submission
+        if anchor.status != AnchorStatus::Pending {
+            return Err(LedgerError::InvalidStateTransition(format!(
+                "Anchor {} is not pending (status: {:?})",
+                anchor_id, anchor.status
+            )));
+        }
 
-        // Update status to submitted
-        self.update_anchor_status(anchor_id, AnchorStatus::Submitted, Some(tx_hash.clone()), None, 0)
-            .await?;
+        // Use P4 provider if available, otherwise fall back to simulated anchoring
+        let tx_hash = if let Some(provider) = &self.anchor_provider {
+            info!(
+                "Submitting anchor {} to {:?} via P4 provider",
+                anchor_id, anchor.chain_type
+            );
+            provider
+                .submit_anchor(anchor.chain_type, anchor.epoch_sequence, &anchor.epoch_root)
+                .await?
+        } else {
+            // Fallback: Generate simulated transaction hash based on chain type and epoch data
+            debug!(
+                "No P4 provider configured, using simulated anchoring for {}",
+                anchor_id
+            );
+            self.generate_simulated_tx_hash(&anchor)
+        };
 
+        let submitted_at = Utc::now();
+
+        // Update status to submitted with the tx hash
+        let session = self.datastore.session().await.map_err(|e| {
+            LedgerError::Storage(format!("Failed to get session: {}", e))
+        })?;
+
+        let query = format!(
+            "UPDATE {} SET status = 'submitted', tx_hash = $tx_hash, submitted_at = $submitted WHERE tenant_id = $tenant AND anchor_id = $anchor_id",
+            AnchorTransactionEntity::TABLE
+        );
+
+        let anchor_id_owned = anchor_id.to_string();
+        session
+            .client()
+            .query(&query)
+            .bind(("tenant", self.tenant_id.clone()))
+            .bind(("anchor_id", anchor_id_owned))
+            .bind(("tx_hash", tx_hash.clone()))
+            .bind(("submitted", submitted_at))
+            .await
+            .map_err(|e| LedgerError::Storage(format!("Update failed: {}", e)))?;
+
+        // For internal chain, immediately finalize
+        if anchor.chain_type == AnchorChainType::Internal {
+            self.update_anchor_status(
+                anchor_id,
+                AnchorStatus::Finalized,
+                Some(tx_hash.clone()),
+                Some(1), // block 1 for internal
+                0,
+            ).await?;
+        }
+
+        info!("Anchor {} submitted with tx_hash: {}", anchor_id, tx_hash);
         Ok(tx_hash)
     }
 
@@ -666,17 +975,27 @@ mod tests {
 
     #[test]
     fn test_chain_type_conversion() {
+        // Primary targets per L0 spec
         assert_eq!(
-            AnchorService::chain_type_to_str(AnchorChainType::Ethereum),
-            "ethereum"
+            AnchorService::chain_type_to_str(AnchorChainType::Bitcoin),
+            "bitcoin"
         );
         assert_eq!(
-            AnchorService::str_to_chain_type("ethereum"),
-            AnchorChainType::Ethereum
+            AnchorService::chain_type_to_str(AnchorChainType::Atomicals),
+            "atomicals"
         );
+        assert_eq!(
+            AnchorService::str_to_chain_type("bitcoin"),
+            AnchorChainType::Bitcoin
+        );
+        assert_eq!(
+            AnchorService::str_to_chain_type("atomicals"),
+            AnchorChainType::Atomicals
+        );
+        // Unknown defaults to Bitcoin (primary target)
         assert_eq!(
             AnchorService::str_to_chain_type("unknown"),
-            AnchorChainType::Internal
+            AnchorChainType::Bitcoin
         );
     }
 
@@ -692,9 +1011,12 @@ mod tests {
 
     #[test]
     fn test_required_confirmations() {
-        assert_eq!(AnchorService::required_confirmations(AnchorChainType::Ethereum), 12);
+        // Primary targets per L0 spec
         assert_eq!(AnchorService::required_confirmations(AnchorChainType::Bitcoin), 6);
-        assert_eq!(AnchorService::required_confirmations(AnchorChainType::Polygon), 256);
+        assert_eq!(AnchorService::required_confirmations(AnchorChainType::Atomicals), 6);
         assert_eq!(AnchorService::required_confirmations(AnchorChainType::Internal), 0);
+        // Legacy chains
+        assert_eq!(AnchorService::required_confirmations(AnchorChainType::Ethereum), 12);
+        assert_eq!(AnchorService::required_confirmations(AnchorChainType::Polygon), 256);
     }
 }

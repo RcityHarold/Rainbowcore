@@ -35,6 +35,38 @@ impl IdentityService {
         }
     }
 
+    /// Create a new Identity Service with persistent sequence
+    pub async fn new_with_persistence(
+        database: Arc<L0Database>,
+        tenant_id: TenantId,
+    ) -> Result<Self, LedgerError> {
+        let service = Self::new(database.clone(), tenant_id.clone());
+        let max_seq = service.load_max_sequence().await?;
+        service
+            .sequence
+            .store(max_seq + 1, std::sync::atomic::Ordering::SeqCst);
+        Ok(service)
+    }
+
+    /// Load the maximum sequence number from existing records
+    async fn load_max_sequence(&self) -> Result<u64, LedgerError> {
+        let actors = self
+            .database
+            .actors
+            .list_all(&self.tenant_id)
+            .await
+            .map_err(Self::map_db_error)?;
+
+        // Find the maximum sequence from all actor IDs
+        let max_seq = actors
+            .iter()
+            .filter_map(|actor| crate::sequence::extract_sequence_from_id(&actor.actor_id))
+            .max()
+            .unwrap_or(0);
+
+        Ok(max_seq)
+    }
+
     /// Generate a new actor ID
     fn generate_actor_id(&self) -> ActorId {
         let seq = self
@@ -49,35 +81,66 @@ impl IdentityService {
         LedgerError::Storage(e.to_string())
     }
 
-    /// Convert ActorEntity to ActorRecord
-    fn entity_to_record(entity: &ActorEntity) -> ActorRecord {
-        ActorRecord {
+    /// Convert string to ActorType with validation
+    fn str_to_actor_type(s: &str) -> LedgerResult<ActorType> {
+        match s {
+            "human_actor" => Ok(ActorType::HumanActor),
+            "ai_actor" => Ok(ActorType::AiActor),
+            "node_actor" => Ok(ActorType::NodeActor),
+            "group_actor" => Ok(ActorType::GroupActor),
+            other => Err(LedgerError::Validation(format!(
+                "Invalid actor_type: '{}'. Expected one of: human_actor, ai_actor, node_actor, group_actor",
+                other
+            ))),
+        }
+    }
+
+    /// Convert string to ActorStatus with validation
+    fn str_to_actor_status(s: &str) -> LedgerResult<ActorStatus> {
+        match s {
+            "active" => Ok(ActorStatus::Active),
+            "suspended" => Ok(ActorStatus::Suspended),
+            "in_repair" => Ok(ActorStatus::InRepair),
+            "terminated" => Ok(ActorStatus::Terminated),
+            other => Err(LedgerError::Validation(format!(
+                "Invalid actor status: '{}'. Expected one of: active, suspended, in_repair, terminated",
+                other
+            ))),
+        }
+    }
+
+    /// Parse Digest from hex string with proper error handling
+    fn parse_digest(hex_str: &str, field_name: &str) -> LedgerResult<Digest> {
+        Digest::from_hex(hex_str).map_err(|e| {
+            LedgerError::Validation(format!(
+                "Invalid {} digest '{}': {}",
+                field_name, hex_str, e
+            ))
+        })
+    }
+
+    /// Convert ActorEntity to ActorRecord with validation
+    fn entity_to_record(entity: &ActorEntity) -> LedgerResult<ActorRecord> {
+        let actor_type = Self::str_to_actor_type(&entity.actor_type)?;
+        let status = Self::str_to_actor_status(&entity.status)?;
+
+        let metadata_digest = match &entity.metadata_digest {
+            Some(d) => Some(Self::parse_digest(d, "metadata")?),
+            None => None,
+        };
+
+        Ok(ActorRecord {
             actor_id: ActorId(entity.actor_id.clone()),
-            actor_type: match entity.actor_type.as_str() {
-                "human_actor" => ActorType::HumanActor,
-                "ai_actor" => ActorType::AiActor,
-                "node_actor" => ActorType::NodeActor,
-                "group_actor" => ActorType::GroupActor,
-                _ => ActorType::HumanActor, // fallback
-            },
+            actor_type,
             node_actor_id: NodeActorId(entity.node_actor_id.clone()),
             public_key: entity.public_key.clone(),
             payment_address_slot: entity.payment_address_slot.clone(),
-            status: match entity.status.as_str() {
-                "active" => ActorStatus::Active,
-                "suspended" => ActorStatus::Suspended,
-                "in_repair" => ActorStatus::InRepair,
-                "terminated" => ActorStatus::Terminated,
-                _ => ActorStatus::Active,
-            },
+            status,
             created_at: entity.created_at,
             updated_at: entity.updated_at,
             receipt_id: entity.receipt_id.as_ref().map(|id| ReceiptId(id.clone())),
-            metadata_digest: entity
-                .metadata_digest
-                .as_ref()
-                .map(|d| Digest::from_hex(d).unwrap_or_default()),
-        }
+            metadata_digest,
+        })
     }
 }
 
@@ -196,7 +259,7 @@ impl IdentityLedger for IdentityService {
             .await
             .map_err(Self::map_db_error)?;
 
-        Ok(Self::entity_to_record(&created))
+        Self::entity_to_record(&created)
     }
 
     async fn get_actor(&self, actor_id: &ActorId) -> LedgerResult<Option<ActorRecord>> {
@@ -207,7 +270,10 @@ impl IdentityLedger for IdentityService {
             .await
             .map_err(Self::map_db_error)?;
 
-        Ok(result.map(|e| Self::entity_to_record(&e)))
+        match result {
+            Some(e) => Ok(Some(Self::entity_to_record(&e)?)),
+            None => Ok(None),
+        }
     }
 
     async fn get_actor_by_pubkey(&self, public_key: &str) -> LedgerResult<Option<ActorRecord>> {
@@ -218,7 +284,10 @@ impl IdentityLedger for IdentityService {
             .await
             .map_err(Self::map_db_error)?;
 
-        Ok(result.map(|e| Self::entity_to_record(&e)))
+        match result {
+            Some(e) => Ok(Some(Self::entity_to_record(&e)?)),
+            None => Ok(None),
+        }
     }
 
     async fn update_status(
@@ -375,6 +444,6 @@ impl IdentityLedger for IdentityService {
             .await
             .map_err(Self::map_db_error)?;
 
-        Ok(entities.iter().map(Self::entity_to_record).collect())
+        entities.iter().map(Self::entity_to_record).collect()
     }
 }

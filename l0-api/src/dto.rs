@@ -272,6 +272,36 @@ pub struct HealthResponse {
     pub current_epoch_sequence: u64,
 }
 
+/// API version information response
+#[derive(Debug, Serialize)]
+pub struct ApiVersionResponse {
+    /// Current API version (e.g., "v1")
+    pub current_version: String,
+    /// All supported API versions
+    pub supported_versions: Vec<String>,
+    /// Deprecated versions (if any)
+    pub deprecated_versions: Vec<String>,
+    /// Node software version
+    pub node_version: String,
+    /// Protocol version information
+    pub protocol_versions: ProtocolVersionsResponse,
+}
+
+/// Protocol version information
+#[derive(Debug, Serialize)]
+pub struct ProtocolVersionsResponse {
+    /// Canonicalization algorithm version
+    pub canonicalization: String,
+    /// Fee schedule version
+    pub fee_schedule: String,
+    /// Anchor policy version
+    pub anchor_policy: String,
+    /// Signer set version
+    pub signer_set: String,
+    /// Threshold rule
+    pub threshold_rule: String,
+}
+
 // ============ Pagination ============
 
 /// Paginated list response

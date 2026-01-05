@@ -70,7 +70,7 @@ async fn test_ready_check() {
 async fn test_get_actor_not_found() {
     let server = create_test_server().await;
 
-    let response = server.get("/actors/nonexistent_actor_id").await;
+    let response = server.get("/api/v1/actors/nonexistent_actor_id").await;
 
     response.assert_status_not_found();
 }
@@ -81,7 +81,7 @@ async fn test_get_actor_not_found() {
 async fn test_get_anchor_policy() {
     let server = create_test_server().await;
 
-    let response = server.get("/anchors/policy").await;
+    let response = server.get("/api/v1/anchors/policy").await;
 
     response.assert_status_ok();
     let body: serde_json::Value = response.json();
@@ -94,7 +94,7 @@ async fn test_get_anchor_policy() {
 async fn test_get_commitment_not_found() {
     let server = create_test_server().await;
 
-    let response = server.get("/commitments/nonexistent_commitment").await;
+    let response = server.get("/api/v1/commitments/nonexistent_commitment").await;
 
     response.assert_status_not_found();
 }
@@ -105,7 +105,7 @@ async fn test_get_commitment_not_found() {
 async fn test_list_disputes_empty() {
     let server = create_test_server().await;
 
-    let response = server.get("/disputes").await;
+    let response = server.get("/api/v1/disputes").await;
 
     response.assert_status_ok();
     let body: serde_json::Value = response.json();
@@ -118,7 +118,7 @@ async fn test_list_disputes_empty() {
 async fn test_get_consent_not_found() {
     let server = create_test_server().await;
 
-    let response = server.get("/consents/nonexistent_consent").await;
+    let response = server.get("/api/v1/consents/nonexistent_consent").await;
 
     response.assert_status_not_found();
 }
@@ -138,7 +138,7 @@ async fn test_e2e_actor_registration_and_commitment() {
     });
 
     let response = server
-        .post("/actors")
+        .post("/api/v1/actors")
         .json(&register_request)
         .await;
 
@@ -161,7 +161,7 @@ async fn test_e2e_actor_registration_and_commitment() {
     });
 
     let response = server
-        .post("/commitments")
+        .post("/api/v1/commitments")
         .json(&commitment_request)
         .await;
 
@@ -179,7 +179,7 @@ async fn test_e2e_actor_registration_and_commitment() {
 
     // Step 3: Retrieve and verify the commitment
     let response = server
-        .get(&format!("/commitments/{}", commitment_id))
+        .get(&format!("/api/v1/commitments/{}", commitment_id))
         .await;
 
     response.assert_status_ok();
@@ -189,7 +189,7 @@ async fn test_e2e_actor_registration_and_commitment() {
 
     // Step 4: Get actor's commitment chain
     let response = server
-        .get(&format!("/commitments/actor/{}", actor_id))
+        .get(&format!("/api/v1/commitments/actor/{}", actor_id))
         .await;
 
     response.assert_status_ok();
@@ -211,7 +211,7 @@ async fn test_e2e_commitment_chain() {
     });
 
     let response = server
-        .post("/actors")
+        .post("/api/v1/actors")
         .json(&register_request)
         .await;
 
@@ -227,7 +227,7 @@ async fn test_e2e_commitment_chain() {
         "parent_ref": null
     });
 
-    let response = server.post("/commitments").json(&commitment1).await;
+    let response = server.post("/api/v1/commitments").json(&commitment1).await;
     response.assert_status_ok();
     let commit1_body: serde_json::Value = response.json();
     let commit1_id = commit1_body["commitment_id"].as_str().unwrap();
@@ -242,7 +242,7 @@ async fn test_e2e_commitment_chain() {
         "parent_ref": commit1_id
     });
 
-    let response = server.post("/commitments").json(&commitment2).await;
+    let response = server.post("/api/v1/commitments").json(&commitment2).await;
     response.assert_status_ok();
     let commit2_body: serde_json::Value = response.json();
     assert_eq!(commit2_body["sequence_no"], 1);
@@ -256,14 +256,14 @@ async fn test_e2e_commitment_chain() {
         "parent_ref": commit2_body["commitment_id"].as_str()
     });
 
-    let response = server.post("/commitments").json(&commitment3).await;
+    let response = server.post("/api/v1/commitments").json(&commitment3).await;
     response.assert_status_ok();
     let commit3_body: serde_json::Value = response.json();
     assert_eq!(commit3_body["sequence_no"], 2);
 
     // Verify chain has 3 commitments
     let response = server
-        .get(&format!("/commitments/actor/{}", actor_id))
+        .get(&format!("/api/v1/commitments/actor/{}", actor_id))
         .await;
 
     response.assert_status_ok();
@@ -284,7 +284,7 @@ async fn test_e2e_tipwitness_flow() {
     });
 
     let response = server
-        .post("/actors")
+        .post("/api/v1/actors")
         .json(&register_request)
         .await;
 
@@ -300,7 +300,7 @@ async fn test_e2e_tipwitness_flow() {
         "parent_ref": null
     });
 
-    let response = server.post("/commitments").json(&commitment).await;
+    let response = server.post("/api/v1/commitments").json(&commitment).await;
     response.assert_status_ok();
 
     // Submit TipWitness
@@ -312,7 +312,7 @@ async fn test_e2e_tipwitness_flow() {
     });
 
     let response = server
-        .post("/tipwitness")
+        .post("/api/v1/tipwitness")
         .json(&tipwitness_request)
         .await;
 
@@ -325,7 +325,7 @@ async fn test_e2e_tipwitness_flow() {
 
     // Get TipWitness history for actor (instead of single GET which might have routing issues)
     let response = server
-        .get(&format!("/tipwitness/{}/history", actor_id))
+        .get(&format!("/api/v1/tipwitness/{}/history", actor_id))
         .await;
 
     response.assert_status_ok();

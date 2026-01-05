@@ -326,7 +326,7 @@ pub async fn update_policy(
     State(state): State<AppState>,
     Json(req): Json<UpdateAnchorPolicyRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    use l0_core::types::{AnchorPolicy, GasStrategy};
+    use l0_core::types::AnchorPolicy;
     use std::collections::HashMap;
 
     let mut min_confirmations = HashMap::new();
@@ -435,21 +435,24 @@ fn anchor_to_response(anchor: &l0_core::types::AnchorTransaction) -> AnchorRespo
 
 fn chain_type_to_str(chain_type: &AnchorChainType) -> &'static str {
     match chain_type {
-        AnchorChainType::Ethereum => "ethereum",
         AnchorChainType::Bitcoin => "bitcoin",
+        AnchorChainType::Atomicals => "atomicals",
+        AnchorChainType::Internal => "internal",
+        AnchorChainType::Ethereum => "ethereum",
         AnchorChainType::Polygon => "polygon",
         AnchorChainType::Solana => "solana",
-        AnchorChainType::Internal => "internal",
     }
 }
 
 fn str_to_chain_type(s: &str) -> AnchorChainType {
     match s.to_lowercase().as_str() {
-        "ethereum" => AnchorChainType::Ethereum,
         "bitcoin" => AnchorChainType::Bitcoin,
+        "atomicals" => AnchorChainType::Atomicals,
+        "ethereum" => AnchorChainType::Ethereum,
         "polygon" => AnchorChainType::Polygon,
         "solana" => AnchorChainType::Solana,
-        _ => AnchorChainType::Internal,
+        // Default to Bitcoin (primary target per L0 spec)
+        _ => AnchorChainType::Bitcoin,
     }
 }
 

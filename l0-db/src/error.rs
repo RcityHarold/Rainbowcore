@@ -24,6 +24,9 @@ pub enum L0DbError {
 
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
+
+    #[error("Validation error: {0}")]
+    Validation(String),
 }
 
 pub type L0DbResult<T> = Result<T, L0DbError>;

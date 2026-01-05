@@ -74,14 +74,22 @@ pub async fn get_commitment_chain(
         ..Default::default()
     };
 
+    let actor = ActorId(actor_id);
+
+    // Get total count for pagination
+    let total = state
+        .causality
+        .count_commitment_chain(&actor, scope_type)
+        .await
+        .map_err(ApiError::Ledger)?;
+
     let commitments = state
         .causality
-        .get_commitment_chain(&ActorId(actor_id), scope_type, options)
+        .get_commitment_chain(&actor, scope_type, options)
         .await
         .map_err(ApiError::Ledger)?;
 
     let items: Vec<CommitmentResponse> = commitments.iter().map(commitment_to_response).collect();
-    let total = items.len() as u64;
 
     Ok(Json(PaginatedResponse {
         items,

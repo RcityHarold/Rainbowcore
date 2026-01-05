@@ -1,4 +1,7 @@
 //! API route handlers
+//!
+//! This module provides versioned API routing. All business endpoints are
+//! served under `/api/v1/` prefix, while health endpoints remain at root level.
 
 pub mod actor;
 pub mod anchor;
@@ -14,12 +17,12 @@ use axum::{routing::get, routing::post, Router};
 
 use crate::state::AppState;
 
-/// Create the API router
-pub fn create_router(state: AppState) -> Router {
+/// API version constant
+pub const API_VERSION: &str = "v1";
+
+/// Create the v1 API routes (business endpoints)
+fn create_v1_routes() -> Router<AppState> {
     Router::new()
-        // Health endpoints
-        .route("/health", get(health::health_check))
-        .route("/ready", get(health::ready_check))
         // Actor endpoints
         .route("/actors", post(actor::register_actor))
         .route("/actors/:actor_id", get(actor::get_actor))
@@ -107,6 +110,28 @@ pub fn create_router(state: AppState) -> Router {
         .route("/anchors/chain/:chain_type/finalized", get(anchor::get_finalized_anchors))
         .route("/anchors/chain/:chain_type/history", get(anchor::get_anchor_history))
         .route("/anchors/chain/:chain_type/latest-epoch", get(anchor::get_latest_finalized_epoch))
+}
+
+/// Create the API router with versioned endpoints
+///
+/// # Route Structure
+///
+/// - `/health` - Health check (unversioned)
+/// - `/ready` - Readiness check (unversioned)
+/// - `/api/version` - Get API version info (unversioned)
+/// - `/api/v1/*` - Version 1 API endpoints
+///
+/// All business endpoints are served under `/api/v1/` prefix.
+/// Health endpoints remain at root level for infrastructure compatibility.
+pub fn create_router(state: AppState) -> Router {
+    Router::new()
+        // Health endpoints (unversioned, at root for infrastructure compatibility)
+        .route("/health", get(health::health_check))
+        .route("/ready", get(health::ready_check))
+        // API version info endpoint
+        .route("/api/version", get(health::api_version))
+        // Versioned API endpoints
+        .nest("/api/v1", create_v1_routes())
         // State
         .with_state(state)
 }

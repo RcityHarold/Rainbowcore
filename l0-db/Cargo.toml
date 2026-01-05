@@ -9,6 +9,7 @@ description = "L0 Database layer - SurrealDB integration via soulbase-storage"
 default = ["surreal"]
 surreal = ["soulbase-storage/surreal"]
 mock = ["soulbase-storage/mock"]
+p4 = ["l0-p4"]
 
 [dependencies]
 l0-core = { path = "../l0-core" }
@@ -34,3 +35,9 @@ thiserror = { workspace = true }
 
 # Random
 rand = "0.8"
+
+# Logging
+tracing = { workspace = true }
+
+# P4 Layer (optional)
+l0-p4 = { path = "../l0-p4", optional = true }

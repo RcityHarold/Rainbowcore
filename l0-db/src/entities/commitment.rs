@@ -114,6 +114,22 @@ pub struct EpochSnapshotEntity {
     pub batch_start: u64,
     pub batch_end: u64,
     pub parent_epoch_root: Option<String>,
+    /// Signer set version used for this epoch
+    pub signer_set_version: String,
+    /// Canonicalization algorithm version
+    pub canonicalization_version: String,
+    /// Chain anchor policy version
+    pub chain_anchor_policy_version: String,
+    /// Threshold rule (e.g., "5/9")
+    pub threshold_rule: String,
+    /// Bitmap indicating which signers participated
+    pub signature_bitmap: Option<String>,
+    /// Aggregated threshold signature proof
+    pub threshold_proof: Option<String>,
+    /// Digest of any gaps in the epoch
+    pub gaps_digest: Option<String>,
+    /// Merkle root of all batch receipts in this epoch
+    pub batch_receipts_digest: String,
     pub chain_anchor_tx: Option<String>,
     pub anchor_status: String,
     pub created_at: DateTime<Utc>,

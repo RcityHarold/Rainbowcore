@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use l0_core::version::config::SIGNING_SESSION_TIMEOUT_SECS;
+
 use crate::error::{NetworkError, NetworkResult};
 use crate::message::{
     L0Message, MessagePayload, NodeId, SignRequestPayload, SignResponsePayload,
@@ -121,7 +123,7 @@ impl<T: Transport> SigningCoordinator<T> {
             node_manager,
             transport,
             sessions: Arc::new(RwLock::new(HashMap::new())),
-            default_timeout: Duration::seconds(300),
+            default_timeout: Duration::seconds(SIGNING_SESSION_TIMEOUT_SECS as i64),
         }
     }
 
@@ -310,22 +312,93 @@ fn generate_session_id() -> String {
     format!("dsign_{:016x}_{:08x}", timestamp, seq)
 }
 
-/// Create bitmap from signatures
-fn create_bitmap(signatures: &HashMap<String, String>) -> String {
-    // For now, just count
-    // In production, this would map pubkeys to signer indices
-    format!("{:09b}", (1u16 << signatures.len()) - 1)
+/// Signer index mapping for a 9-node signer set
+/// This would be loaded from the signer set configuration in production
+fn get_signer_index(pubkey: &str, signer_set: &[String]) -> Option<u8> {
+    signer_set.iter().position(|pk| pk == pubkey).map(|i| i as u8)
 }
 
-/// Create aggregated proof from signatures
-fn create_aggregated_proof(signatures: &HashMap<String, String>) -> String {
-    // Format: bitmap|pubkey1:sig1|pubkey2:sig2|...
-    let mut parts = Vec::new();
-    parts.push(create_bitmap(signatures));
-    for (pubkey, sig) in signatures {
-        parts.push(format!("{}:{}", pubkey, sig));
+/// Create bitmap from signatures
+/// The bitmap indicates which signers have signed (bit position = signer index)
+/// For a 9-signer set, this is a 9-bit value (stored as u16)
+fn create_bitmap(signatures: &HashMap<String, String>) -> String {
+    // Sort pubkeys to get consistent ordering
+    let mut sorted_pubkeys: Vec<&String> = signatures.keys().collect();
+    sorted_pubkeys.sort();
+
+    // Create a simple index-based bitmap
+    // In production, this would use the actual signer set to map pubkeys to indices
+    let mut bitmap: u16 = 0;
+    for (i, _pubkey) in sorted_pubkeys.iter().enumerate() {
+        // Set bit at position i
+        if i < 9 {
+            bitmap |= 1 << i;
+        }
     }
-    parts.join("|")
+
+    // Format as hex for compact representation
+    format!("{:04x}", bitmap)
+}
+
+/// Aggregated signature proof structure
+/// Contains the bitmap and the concatenated signatures
+fn create_aggregated_proof(signatures: &HashMap<String, String>) -> String {
+    // Sort pubkeys for deterministic ordering
+    let mut sorted_entries: Vec<(&String, &String)> = signatures.iter().collect();
+    sorted_entries.sort_by(|a, b| a.0.cmp(b.0));
+
+    // Create structured proof:
+    // Format: version:bitmap:count:sig1_len:sig1:sig2_len:sig2:...
+    // This allows for proper parsing and verification
+
+    let bitmap = create_bitmap(signatures);
+    let count = signatures.len();
+
+    // Build proof components
+    let mut proof_parts = Vec::new();
+    proof_parts.push("v1".to_string());              // Version
+    proof_parts.push(bitmap);                         // Bitmap
+    proof_parts.push(count.to_string());              // Signature count
+
+    // Add each signature with its pubkey for verification
+    for (pubkey, sig) in &sorted_entries {
+        // Format: pubkey_first8chars|signature
+        let pk_short = if pubkey.len() > 8 {
+            &pubkey[..8]
+        } else {
+            pubkey.as_str()
+        };
+        proof_parts.push(format!("{}={}", pk_short, sig));
+    }
+
+    proof_parts.join(":")
+}
+
+/// Parse an aggregated proof to extract signatures
+pub fn parse_aggregated_proof(proof: &str) -> Option<(String, u32, Vec<(String, String)>)> {
+    let parts: Vec<&str> = proof.split(':').collect();
+    if parts.len() < 3 {
+        return None;
+    }
+
+    // Check version
+    if parts[0] != "v1" {
+        return None;
+    }
+
+    let bitmap = parts[1].to_string();
+    let count: u32 = parts[2].parse().ok()?;
+
+    // Parse signatures
+    let mut signatures = Vec::new();
+    for part in &parts[3..] {
+        let sig_parts: Vec<&str> = part.splitn(2, '=').collect();
+        if sig_parts.len() == 2 {
+            signatures.push((sig_parts[0].to_string(), sig_parts[1].to_string()));
+        }
+    }
+
+    Some((bitmap, count, signatures))
 }
 
 #[cfg(test)]
@@ -348,7 +421,7 @@ mod tests {
             metadata,
             "v1:1".to_string(),
             3,
-            Duration::seconds(300),
+            Duration::seconds(SIGNING_SESSION_TIMEOUT_SECS as i64),
         );
 
         assert!(!session.threshold_met());

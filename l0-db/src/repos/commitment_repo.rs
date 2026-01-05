@@ -535,6 +535,39 @@ impl L0CommitmentRepo {
         Ok(results)
     }
 
+    /// Update batch snapshot with signature data
+    ///
+    /// This method is called after the batch has been signed by the threshold
+    /// signers. It updates the signature_bitmap and threshold_proof fields.
+    pub async fn update_batch_signature(
+        &self,
+        tenant: &TenantId,
+        batch_sequence_no: u64,
+        signature_bitmap: &str,
+        threshold_proof: &str,
+    ) -> L0DbResult<()> {
+        let session = self.datastore.session().await.map_err(L0DbError::Storage)?;
+        let client = session.client();
+
+        let query = format!(
+            "UPDATE {} SET signature_bitmap = $bitmap, threshold_proof = $proof WHERE tenant_id = $tenant AND batch_sequence_no = $seq",
+            BatchSnapshotEntity::TABLE
+        );
+
+        let tenant_str = tenant.0.clone();
+
+        client
+            .query(&query)
+            .bind(("tenant", tenant_str))
+            .bind(("seq", batch_sequence_no))
+            .bind(("bitmap", signature_bitmap.to_string()))
+            .bind(("proof", threshold_proof.to_string()))
+            .await
+            .map_err(|e| L0DbError::QueryError(e.to_string()))?;
+
+        Ok(())
+    }
+
     /// Get the latest epoch sequence number
     pub async fn get_latest_epoch_sequence(&self, tenant: &TenantId) -> L0DbResult<u64> {
         let session = self.datastore.session().await.map_err(L0DbError::Storage)?;
@@ -563,5 +596,60 @@ impl L0CommitmentRepo {
             .map_err(|e| L0DbError::QueryError(e.to_string()))?;
 
         Ok(result.map(|r| r.epoch_sequence_no).unwrap_or(0))
+    }
+
+    /// Count commitments for an actor with optional scope filter
+    ///
+    /// Used for accurate pagination counts.
+    pub async fn count_by_actor(
+        &self,
+        tenant: &TenantId,
+        actor_id: &str,
+        scope_type: Option<&str>,
+    ) -> L0DbResult<u64> {
+        let session = self.datastore.session().await.map_err(L0DbError::Storage)?;
+        let client = session.client();
+
+        let query = match scope_type {
+            Some(_) => format!(
+                "SELECT count() AS total FROM {} WHERE tenant_id = $tenant AND actor_id = $actor AND scope_type = $scope GROUP ALL",
+                CommitmentEntity::TABLE
+            ),
+            None => format!(
+                "SELECT count() AS total FROM {} WHERE tenant_id = $tenant AND actor_id = $actor GROUP ALL",
+                CommitmentEntity::TABLE
+            ),
+        };
+
+        let tenant_str = tenant.0.clone();
+        let actor_str = actor_id.to_string();
+
+        let mut response = if let Some(scope) = scope_type {
+            client
+                .query(&query)
+                .bind(("tenant", tenant_str))
+                .bind(("actor", actor_str))
+                .bind(("scope", scope.to_string()))
+                .await
+                .map_err(|e| L0DbError::QueryError(e.to_string()))?
+        } else {
+            client
+                .query(&query)
+                .bind(("tenant", tenant_str))
+                .bind(("actor", actor_str))
+                .await
+                .map_err(|e| L0DbError::QueryError(e.to_string()))?
+        };
+
+        #[derive(serde::Deserialize)]
+        struct CountResult {
+            total: u64,
+        }
+
+        let result: Option<CountResult> = response
+            .take(0)
+            .map_err(|e| L0DbError::QueryError(e.to_string()))?;
+
+        Ok(result.map(|r| r.total).unwrap_or(0))
     }
 }

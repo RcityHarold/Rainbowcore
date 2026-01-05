@@ -12,7 +12,13 @@
 //! - Feldman's VSS-based protocol
 //! - Share splitting and reconstruction
 //! - Multi-signer coordination
+//!
+//! BLS Threshold Signatures:
+//! - BLS12-381 curve signatures
+//! - Signature aggregation
+//! - 5/9 threshold verification
 
+pub mod bls;
 pub mod crypto;
 pub mod dkg;
 pub mod error;
@@ -20,6 +26,7 @@ pub mod session;
 pub mod signer;
 pub mod signer_set;
 
+pub use bls::*;
 pub use crypto::*;
 pub use dkg::*;
 pub use error::*;

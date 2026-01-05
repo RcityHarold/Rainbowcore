@@ -6,6 +6,7 @@ use std::io::{self, Write};
 
 /// Interactive mode configuration
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct InteractiveConfig {
     /// Prompt string
     pub prompt: String,
@@ -68,6 +69,7 @@ impl CommandHistory {
     }
 
     /// Clear history
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.entries.clear();
     }
@@ -100,6 +102,7 @@ impl InteractiveSession {
     }
 
     /// Create with custom config
+    #[allow(dead_code)]
     pub fn with_config(db_url: String, tenant: String, config: InteractiveConfig) -> Self {
         let max_history = config.max_history;
         Self {

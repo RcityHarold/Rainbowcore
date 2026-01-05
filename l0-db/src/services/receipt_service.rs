@@ -3,11 +3,12 @@
 //! Implements the ReceiptLedger trait for managing L0 receipts and fee receipts.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use l0_core::error::LedgerError;
 use l0_core::ledger::{
     ChargeFeeRequest, CreateReceiptRequest, Ledger, LedgerResult, QueryOptions, ReceiptLedger,
 };
+use l0_core::crypto::IncrementalMerkleTree;
 use l0_core::types::{
     ActorId, Digest, FeeReceipt, FeeReceiptStatus, FeeUnits, L0Receipt, ReceiptId,
     ReceiptVerifyResult, RootKind, ScopeType,
@@ -19,6 +20,7 @@ use soulbase_types::prelude::TenantId;
 use std::sync::Arc;
 
 use crate::entities::{FeeReceiptEntity, ReceiptEntity};
+use crate::validation::validate_tipwitness_free;
 
 /// Receipt Ledger Service
 pub struct ReceiptService {
@@ -35,6 +37,60 @@ impl ReceiptService {
             tenant_id,
             sequence: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Create a new Receipt Service with persistent sequence
+    ///
+    /// This constructor loads the maximum sequence number from the database
+    /// to ensure unique IDs across service restarts.
+    pub async fn new_with_persistence(
+        datastore: Arc<SurrealDatastore>,
+        tenant_id: TenantId,
+    ) -> Result<Self, l0_core::error::LedgerError> {
+        let service = Self::new(datastore.clone(), tenant_id.clone());
+
+        // Load max sequence from database
+        let max_seq = service.load_max_sequence().await?;
+        service
+            .sequence
+            .store(max_seq + 1, std::sync::atomic::Ordering::SeqCst);
+
+        Ok(service)
+    }
+
+    /// Load the maximum sequence number from existing records
+    async fn load_max_sequence(&self) -> Result<u64, l0_core::error::LedgerError> {
+        use l0_core::error::LedgerError;
+
+        let session = self.datastore.session().await.map_err(|e| {
+            LedgerError::Storage(format!("Failed to get session: {}", e))
+        })?;
+
+        // Query for the latest receipt to get max sequence
+        let query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant ORDER BY created_at DESC LIMIT 1",
+            ReceiptEntity::TABLE
+        );
+
+        let mut response = session
+            .client()
+            .query(&query)
+            .bind(("tenant", self.tenant_id.clone()))
+            .await
+            .map_err(|e| LedgerError::Storage(format!("Query failed: {}", e)))?;
+
+        let result: Option<ReceiptEntity> = response
+            .take(0)
+            .map_err(|e| LedgerError::Storage(format!("Parse failed: {}", e)))?;
+
+        if let Some(receipt) = result {
+            // Extract sequence from receipt_id format: prefix_timestamp_sequence
+            if let Some(seq) = crate::sequence::extract_sequence_from_id(&receipt.receipt_id) {
+                return Ok(seq);
+            }
+        }
+
+        Ok(0)
     }
 
     /// Generate a new ID
@@ -122,6 +178,7 @@ impl ReceiptService {
     }
 
     /// Convert FeeUnits to string
+    #[allow(dead_code)]
     fn fee_units_to_str(u: FeeUnits) -> &'static str {
         match u {
             FeeUnits::BatchRoot => "batch_root",
@@ -196,10 +253,145 @@ impl Ledger for ReceiptService {
     }
 
     async fn current_root(&self) -> LedgerResult<Digest> {
-        Ok(Digest::zero())
+        // Query all receipts to compute Merkle root
+        let session = self.datastore.session().await.map_err(|e| {
+            LedgerError::Storage(format!("Failed to get session: {}", e))
+        })?;
+
+        let query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant ORDER BY created_at ASC",
+            ReceiptEntity::TABLE
+        );
+
+        let mut response = session
+            .client()
+            .query(&query)
+            .bind(("tenant", self.tenant_id.clone()))
+            .await
+            .map_err(|e| LedgerError::Storage(format!("Query failed: {}", e)))?;
+
+        let receipts: Vec<ReceiptEntity> = response
+            .take(0)
+            .map_err(|e| LedgerError::Storage(format!("Parse failed: {}", e)))?;
+
+        if receipts.is_empty() {
+            return Ok(Digest::zero());
+        }
+
+        // Build Merkle tree from receipt data
+        let mut tree = IncrementalMerkleTree::new();
+        for receipt in &receipts {
+            // Create deterministic hash from receipt data
+            let batch_seq = receipt.batch_sequence_no.unwrap_or(0);
+            let receipt_data = format!(
+                "{}:{}:{}:{}:{}",
+                receipt.receipt_id,
+                receipt.scope_type,
+                receipt.root,
+                batch_seq,
+                receipt.created_at.timestamp_micros()
+            );
+            let digest = Digest::blake3(receipt_data.as_bytes());
+            tree.add(digest);
+        }
+
+        Ok(tree.root())
     }
 
     async fn verify_integrity(&self) -> LedgerResult<bool> {
+        // Verify receipt ledger integrity
+        let session = self.datastore.session().await.map_err(|e| {
+            LedgerError::Storage(format!("Failed to get session: {}", e))
+        })?;
+
+        // Check 1: All receipts have valid structure
+        let query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant ORDER BY created_at ASC",
+            ReceiptEntity::TABLE
+        );
+
+        let mut response = session
+            .client()
+            .query(&query)
+            .bind(("tenant", self.tenant_id.clone()))
+            .await
+            .map_err(|e| LedgerError::Storage(format!("Query failed: {}", e)))?;
+
+        let receipts: Vec<ReceiptEntity> = response
+            .take(0)
+            .map_err(|e| LedgerError::Storage(format!("Parse failed: {}", e)))?;
+
+        // Verify each receipt has required fields
+        for receipt in &receipts {
+            // Verify receipt_id is not empty
+            if receipt.receipt_id.is_empty() {
+                return Ok(false);
+            }
+
+            // Verify root is valid hex (can be parsed)
+            if Digest::from_hex(&receipt.root).is_err() {
+                return Ok(false);
+            }
+
+            // Verify time window is valid (start <= end)
+            if receipt.time_window_start > receipt.time_window_end {
+                return Ok(false);
+            }
+
+            // Verify version fields are not empty
+            if receipt.signer_set_version.is_empty()
+                || receipt.canonicalization_version.is_empty()
+                || receipt.anchor_policy_version.is_empty()
+                || receipt.fee_schedule_version.is_empty()
+            {
+                return Ok(false);
+            }
+        }
+
+        // Check 2: Verify batch sequence numbers are monotonically increasing (per scope type)
+        let mut last_seq_by_scope: std::collections::HashMap<String, u64> =
+            std::collections::HashMap::new();
+
+        for receipt in &receipts {
+            let last_seq = last_seq_by_scope
+                .get(&receipt.scope_type)
+                .copied()
+                .unwrap_or(0);
+
+            let current_seq = receipt.batch_sequence_no.unwrap_or(0);
+            if current_seq < last_seq {
+                // Sequence went backwards - integrity violation
+                return Ok(false);
+            }
+
+            last_seq_by_scope.insert(receipt.scope_type.clone(), current_seq);
+        }
+
+        // Check 3: Verify fee receipts are properly linked
+        let fee_query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant",
+            FeeReceiptEntity::TABLE
+        );
+
+        let mut fee_response = session
+            .client()
+            .query(&fee_query)
+            .bind(("tenant", self.tenant_id.clone()))
+            .await
+            .map_err(|e| LedgerError::Storage(format!("Fee query failed: {}", e)))?;
+
+        let fee_receipts: Vec<FeeReceiptEntity> = fee_response
+            .take(0)
+            .map_err(|e| LedgerError::Storage(format!("Fee parse failed: {}", e)))?;
+
+        // Verify fee receipt IDs are unique
+        let mut fee_ids = std::collections::HashSet::new();
+        for fee in &fee_receipts {
+            if !fee_ids.insert(&fee.fee_receipt_id) {
+                return Ok(false); // Duplicate fee receipt ID
+            }
+        }
+
         Ok(true)
     }
 }
@@ -390,6 +582,11 @@ impl ReceiptLedger for ReceiptService {
     }
 
     async fn charge_fee(&self, request: ChargeFeeRequest) -> LedgerResult<FeeReceipt> {
+        // Validate: TipWitness operations must be free
+        validate_tipwitness_free(&request.anchor_type, request.units_count as u64).map_err(|e| {
+            LedgerError::Validation(e.to_string())
+        })?;
+
         let fee_receipt_id = self.generate_id("fee");
         let now = Utc::now();
 

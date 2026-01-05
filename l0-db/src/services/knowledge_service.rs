@@ -37,6 +37,50 @@ impl KnowledgeService {
         }
     }
 
+    /// Create a new Knowledge Service with persistent sequence
+    pub async fn new_with_persistence(
+        datastore: Arc<SurrealDatastore>,
+        tenant_id: TenantId,
+    ) -> Result<Self, LedgerError> {
+        let service = Self::new(datastore.clone(), tenant_id.clone());
+        let max_seq = service.load_max_sequence().await?;
+        service
+            .sequence
+            .store(max_seq + 1, std::sync::atomic::Ordering::SeqCst);
+        Ok(service)
+    }
+
+    /// Load the maximum sequence number from existing records
+    async fn load_max_sequence(&self) -> Result<u64, LedgerError> {
+        let session = self.datastore.session().await.map_err(|e| {
+            LedgerError::Storage(format!("Failed to get session: {}", e))
+        })?;
+
+        let query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant ORDER BY created_at DESC LIMIT 1",
+            KnowledgeIndexEntity::TABLE
+        );
+
+        let mut response = session
+            .client()
+            .query(&query)
+            .bind(("tenant", self.tenant_id.clone()))
+            .await
+            .map_err(|e| LedgerError::Storage(format!("Query failed: {}", e)))?;
+
+        let result: Option<KnowledgeIndexEntity> = response
+            .take(0)
+            .map_err(|e| LedgerError::Storage(format!("Parse failed: {}", e)))?;
+
+        if let Some(entry) = result {
+            if let Some(seq) = crate::sequence::extract_sequence_from_id(&entry.entry_id) {
+                return Ok(seq);
+            }
+        }
+
+        Ok(0)
+    }
+
     /// Generate a new entry ID
     fn generate_entry_id(&self) -> String {
         let seq = self
@@ -132,23 +176,103 @@ impl KnowledgeService {
         }
     }
 
-    /// Query knowledge index entries
-    async fn query_entries(&self, where_clause: &str, limit: u32) -> LedgerResult<Vec<KnowledgeIndexEntity>> {
+    /// Query knowledge index entry by entry_id (parameterized query - SQL injection safe)
+    async fn query_entry_by_id(&self, entry_id: &str) -> LedgerResult<Option<KnowledgeIndexEntity>> {
         let session = self.datastore.session().await.map_err(|e| {
             LedgerError::Storage(format!("Failed to get session: {}", e))
         })?;
 
         let query = format!(
-            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant {} ORDER BY created_at DESC LIMIT {}",
-            KnowledgeIndexEntity::TABLE,
-            where_clause,
-            limit
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant AND entry_id = $entry_id LIMIT 1",
+            KnowledgeIndexEntity::TABLE
         );
 
         let mut response = session
             .client()
             .query(&query)
             .bind(("tenant", self.tenant_id.clone()))
+            .bind(("entry_id", entry_id.to_string()))
+            .await
+            .map_err(|e| LedgerError::Storage(format!("Query failed: {}", e)))?;
+
+        let result: Option<KnowledgeIndexEntity> = response
+            .take(0)
+            .map_err(|e| LedgerError::Storage(format!("Parse failed: {}", e)))?;
+
+        Ok(result)
+    }
+
+    /// Query knowledge index entries by content_digest (parameterized query - SQL injection safe)
+    async fn query_entries_by_content_digest(&self, content_digest: &str, limit: u32) -> LedgerResult<Vec<KnowledgeIndexEntity>> {
+        let session = self.datastore.session().await.map_err(|e| {
+            LedgerError::Storage(format!("Failed to get session: {}", e))
+        })?;
+
+        let query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant AND content_digest = $digest ORDER BY created_at DESC LIMIT $limit",
+            KnowledgeIndexEntity::TABLE
+        );
+
+        let mut response = session
+            .client()
+            .query(&query)
+            .bind(("tenant", self.tenant_id.clone()))
+            .bind(("digest", content_digest.to_string()))
+            .bind(("limit", limit))
+            .await
+            .map_err(|e| LedgerError::Storage(format!("Query failed: {}", e)))?;
+
+        let results: Vec<KnowledgeIndexEntity> = response
+            .take(0)
+            .map_err(|e| LedgerError::Storage(format!("Parse failed: {}", e)))?;
+
+        Ok(results)
+    }
+
+    /// Query knowledge index entries by space_id (parameterized query - SQL injection safe)
+    async fn query_entries_by_space(&self, space_id: &str, limit: u32) -> LedgerResult<Vec<KnowledgeIndexEntity>> {
+        let session = self.datastore.session().await.map_err(|e| {
+            LedgerError::Storage(format!("Failed to get session: {}", e))
+        })?;
+
+        let query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant AND space_id = $space_id ORDER BY created_at DESC LIMIT $limit",
+            KnowledgeIndexEntity::TABLE
+        );
+
+        let mut response = session
+            .client()
+            .query(&query)
+            .bind(("tenant", self.tenant_id.clone()))
+            .bind(("space_id", space_id.to_string()))
+            .bind(("limit", limit))
+            .await
+            .map_err(|e| LedgerError::Storage(format!("Query failed: {}", e)))?;
+
+        let results: Vec<KnowledgeIndexEntity> = response
+            .take(0)
+            .map_err(|e| LedgerError::Storage(format!("Parse failed: {}", e)))?;
+
+        Ok(results)
+    }
+
+    /// Query knowledge index entries by owner_actor_id (parameterized query - SQL injection safe)
+    async fn query_entries_by_actor(&self, actor_id: &str, limit: u32) -> LedgerResult<Vec<KnowledgeIndexEntity>> {
+        let session = self.datastore.session().await.map_err(|e| {
+            LedgerError::Storage(format!("Failed to get session: {}", e))
+        })?;
+
+        let query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant AND owner_actor_id = $actor_id ORDER BY created_at DESC LIMIT $limit",
+            KnowledgeIndexEntity::TABLE
+        );
+
+        let mut response = session
+            .client()
+            .query(&query)
+            .bind(("tenant", self.tenant_id.clone()))
+            .bind(("actor_id", actor_id.to_string()))
+            .bind(("limit", limit))
             .await
             .map_err(|e| LedgerError::Storage(format!("Query failed: {}", e)))?;
 
@@ -339,21 +463,18 @@ impl KnowledgeLedger for KnowledgeService {
     }
 
     async fn get_entry(&self, entry_id: &str) -> LedgerResult<Option<KnowledgeIndexEntry>> {
-        let entries = self
-            .query_entries(&format!("AND entry_id = '{}'", entry_id), 1)
-            .await?;
-        Ok(entries.first().map(Self::entity_to_entry))
+        // Use parameterized query to prevent SQL injection
+        let entry = self.query_entry_by_id(entry_id).await?;
+        Ok(entry.map(|e| Self::entity_to_entry(&e)))
     }
 
     async fn get_entries_by_digest(
         &self,
         content_digest: &Digest,
     ) -> LedgerResult<Vec<KnowledgeIndexEntry>> {
+        // Use parameterized query to prevent SQL injection
         let entries = self
-            .query_entries(
-                &format!("AND content_digest = '{}'", content_digest.to_hex()),
-                100,
-            )
+            .query_entries_by_content_digest(&content_digest.to_hex(), 100)
             .await?;
         Ok(entries.iter().map(Self::entity_to_entry).collect())
     }
@@ -364,8 +485,9 @@ impl KnowledgeLedger for KnowledgeService {
         options: QueryOptions,
     ) -> LedgerResult<Vec<KnowledgeIndexEntry>> {
         let limit = options.limit.unwrap_or(100);
+        // Use parameterized query to prevent SQL injection
         let entries = self
-            .query_entries(&format!("AND space_id = '{}'", space_id.0), limit)
+            .query_entries_by_space(&space_id.0, limit)
             .await?;
         Ok(entries.iter().map(Self::entity_to_entry).collect())
     }
@@ -376,8 +498,9 @@ impl KnowledgeLedger for KnowledgeService {
         options: QueryOptions,
     ) -> LedgerResult<Vec<KnowledgeIndexEntry>> {
         let limit = options.limit.unwrap_or(100);
+        // Use parameterized query to prevent SQL injection
         let entries = self
-            .query_entries(&format!("AND owner_actor_id = '{}'", actor_id.0), limit)
+            .query_entries_by_actor(&actor_id.0, limit)
             .await?;
         Ok(entries.iter().map(Self::entity_to_entry).collect())
     }

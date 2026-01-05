@@ -4,12 +4,11 @@
 //! evidence through backfill operations.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 
 use super::{Ledger, LedgerResult};
 use crate::types::{
     ActorId, BackfillPlan, BackfillReceipt, BackfillRequest, BackfillScope, BackfillStatus,
-    ContinuityCheckResult, Digest, GapRecord, GapType,
+    ContinuityCheckResult, Digest, GapRecord,
 };
 
 /// Backfill request creation parameters

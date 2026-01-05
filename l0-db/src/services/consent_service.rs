@@ -5,6 +5,7 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use l0_core::crypto::IncrementalMerkleTree;
 use l0_core::error::LedgerError;
 use l0_core::ledger::{ConsentLedger, ConsentVerifyResult, Ledger, LedgerResult, QueryOptions};
 use l0_core::types::{
@@ -15,9 +16,11 @@ use soulbase_storage::model::Entity;
 use soulbase_storage::surreal::SurrealDatastore;
 use soulbase_storage::Datastore;
 use soulbase_types::prelude::TenantId;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::entities::{AccessTicketEntity, ConsentEntity, CovenantEntity, DelegationEntity, EmergencyOverrideEntity};
+use crate::validation::validate_not_space;
 
 /// Policy-Consent Ledger Service
 pub struct ConsentService {
@@ -34,6 +37,50 @@ impl ConsentService {
             tenant_id,
             sequence: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Create a new Consent Service with persistent sequence
+    pub async fn new_with_persistence(
+        datastore: Arc<SurrealDatastore>,
+        tenant_id: TenantId,
+    ) -> Result<Self, LedgerError> {
+        let service = Self::new(datastore.clone(), tenant_id.clone());
+        let max_seq = service.load_max_sequence().await?;
+        service
+            .sequence
+            .store(max_seq + 1, std::sync::atomic::Ordering::SeqCst);
+        Ok(service)
+    }
+
+    /// Load the maximum sequence number from existing records
+    async fn load_max_sequence(&self) -> Result<u64, LedgerError> {
+        let session = self.datastore.session().await.map_err(|e| {
+            LedgerError::Storage(format!("Failed to get session: {}", e))
+        })?;
+
+        let query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant ORDER BY created_at DESC LIMIT 1",
+            ConsentEntity::TABLE
+        );
+
+        let mut response = session
+            .client()
+            .query(&query)
+            .bind(("tenant", self.tenant_id.clone()))
+            .await
+            .map_err(|e| LedgerError::Storage(format!("Query failed: {}", e)))?;
+
+        let result: Option<ConsentEntity> = response
+            .take(0)
+            .map_err(|e| LedgerError::Storage(format!("Parse failed: {}", e)))?;
+
+        if let Some(consent) = result {
+            if let Some(seq) = crate::sequence::extract_sequence_from_id(&consent.consent_id) {
+                return Ok(seq);
+            }
+        }
+
+        Ok(0)
     }
 
     /// Generate a new ID
@@ -55,14 +102,17 @@ impl ConsentService {
         }
     }
 
-    /// Convert string to ConsentType
-    fn str_to_consent_type(s: &str) -> ConsentType {
+    /// Convert string to ConsentType with validation
+    fn str_to_consent_type(s: &str) -> LedgerResult<ConsentType> {
         match s {
-            "explicit" => ConsentType::Explicit,
-            "implied" => ConsentType::Implied,
-            "delegated" => ConsentType::Delegated,
-            "emergency" => ConsentType::Emergency,
-            _ => ConsentType::Explicit,
+            "explicit" => Ok(ConsentType::Explicit),
+            "implied" => Ok(ConsentType::Implied),
+            "delegated" => Ok(ConsentType::Delegated),
+            "emergency" => Ok(ConsentType::Emergency),
+            other => Err(LedgerError::Validation(format!(
+                "Invalid consent_type: '{}'. Expected one of: explicit, implied, delegated, emergency",
+                other
+            ))),
         }
     }
 
@@ -76,47 +126,73 @@ impl ConsentService {
         }
     }
 
-    /// Convert string to ConsentStatus
-    fn str_to_consent_status(s: &str) -> ConsentStatus {
+    /// Convert string to ConsentStatus with validation
+    fn str_to_consent_status(s: &str) -> LedgerResult<ConsentStatus> {
         match s {
-            "active" => ConsentStatus::Active,
-            "expired" => ConsentStatus::Expired,
-            "revoked" => ConsentStatus::Revoked,
-            "superseded" => ConsentStatus::Superseded,
-            _ => ConsentStatus::Active,
+            "active" => Ok(ConsentStatus::Active),
+            "expired" => Ok(ConsentStatus::Expired),
+            "revoked" => Ok(ConsentStatus::Revoked),
+            "superseded" => Ok(ConsentStatus::Superseded),
+            other => Err(LedgerError::Validation(format!(
+                "Invalid consent status: '{}'. Expected one of: active, expired, revoked, superseded",
+                other
+            ))),
         }
     }
 
-    /// Convert entity to ConsentRecord
-    fn entity_to_consent_record(entity: &ConsentEntity) -> ConsentRecord {
-        ConsentRecord {
+    /// Parse Digest from hex string with proper error handling
+    fn parse_digest(hex_str: &str, field_name: &str) -> LedgerResult<Digest> {
+        Digest::from_hex(hex_str).map_err(|e| {
+            LedgerError::Validation(format!(
+                "Invalid {} digest '{}': {}",
+                field_name, hex_str, e
+            ))
+        })
+    }
+
+    /// Convert entity to ConsentRecord with validation
+    fn entity_to_consent_record(entity: &ConsentEntity) -> LedgerResult<ConsentRecord> {
+        let consent_type = Self::str_to_consent_type(&entity.consent_type)?;
+        let status = Self::str_to_consent_status(&entity.status)?;
+        let terms_digest = Self::parse_digest(&entity.terms_digest, "terms")?;
+
+        let constraints_digest = match &entity.constraints_digest {
+            Some(d) => Some(Self::parse_digest(d, "constraints")?),
+            None => None,
+        };
+
+        let revocation_reason_digest = match &entity.revocation_reason_digest {
+            Some(d) => Some(Self::parse_digest(d, "revocation_reason")?),
+            None => None,
+        };
+
+        Ok(ConsentRecord {
             consent_id: entity.consent_id.clone(),
-            consent_type: Self::str_to_consent_type(&entity.consent_type),
+            consent_type,
             grantor: ActorId(entity.grantor.clone()),
             grantee: ActorId(entity.grantee.clone()),
             scope: ConsentScope {
                 resource_type: entity.resource_type.clone(),
                 resource_id: entity.resource_id.clone(),
                 actions: entity.actions.clone(),
-                constraints_digest: entity.constraints_digest.as_ref().and_then(|d| Digest::from_hex(d).ok()),
+                constraints_digest,
             },
-            status: Self::str_to_consent_status(&entity.status),
-            terms_digest: Digest::from_hex(&entity.terms_digest).unwrap_or_default(),
+            status,
+            terms_digest,
             granted_at: entity.granted_at,
             expires_at: entity.expires_at,
             revoked_at: entity.revoked_at,
-            revocation_reason_digest: entity
-                .revocation_reason_digest
-                .as_ref()
-                .and_then(|d| Digest::from_hex(d).ok()),
+            revocation_reason_digest,
             superseded_by: entity.superseded_by.clone(),
             receipt_id: entity.receipt_id.as_ref().map(|r| ReceiptId(r.clone())),
-        }
+        })
     }
 
-    /// Convert entity to AccessTicket
-    fn entity_to_ticket(entity: &AccessTicketEntity) -> AccessTicket {
-        AccessTicket {
+    /// Convert entity to AccessTicket with validation
+    fn entity_to_ticket(entity: &AccessTicketEntity) -> LedgerResult<AccessTicket> {
+        let ticket_digest = Self::parse_digest(&entity.ticket_digest, "ticket")?;
+
+        Ok(AccessTicket {
             ticket_id: entity.ticket_id.clone(),
             consent_ref: entity.consent_ref.clone(),
             holder: ActorId(entity.holder.clone()),
@@ -127,9 +203,9 @@ impl ConsentService {
             valid_until: entity.valid_until,
             one_time: entity.one_time,
             used_at: entity.used_at,
-            ticket_digest: Digest::from_hex(&entity.ticket_digest).unwrap_or_default(),
+            ticket_digest,
             receipt_id: entity.receipt_id.as_ref().map(|r| ReceiptId(r.clone())),
-        }
+        })
     }
 
     /// Convert entity to DelegationRecord
@@ -166,49 +242,70 @@ impl ConsentService {
         }
     }
 
-    /// Convert string to EmergencyJustificationType
-    fn str_to_justification_type(s: &str) -> EmergencyJustificationType {
+    /// Convert string to EmergencyJustificationType with validation
+    fn str_to_justification_type(s: &str) -> LedgerResult<EmergencyJustificationType> {
         match s {
-            "safety_risk" => EmergencyJustificationType::SafetyRisk,
-            "security_breach" => EmergencyJustificationType::SecurityBreach,
-            "legal_compliance" => EmergencyJustificationType::LegalCompliance,
-            "system_integrity" => EmergencyJustificationType::SystemIntegrity,
-            _ => EmergencyJustificationType::Other,
+            "safety_risk" => Ok(EmergencyJustificationType::SafetyRisk),
+            "security_breach" => Ok(EmergencyJustificationType::SecurityBreach),
+            "legal_compliance" => Ok(EmergencyJustificationType::LegalCompliance),
+            "system_integrity" => Ok(EmergencyJustificationType::SystemIntegrity),
+            "other" => Ok(EmergencyJustificationType::Other),
+            other => Err(LedgerError::Validation(format!(
+                "Invalid justification_type: '{}'. Expected one of: safety_risk, security_breach, legal_compliance, system_integrity, other",
+                other
+            ))),
         }
     }
 
-    /// Convert entity to EmergencyOverrideRecord
-    fn entity_to_override(entity: &EmergencyOverrideEntity) -> EmergencyOverrideRecord {
-        EmergencyOverrideRecord {
+    /// Convert entity to EmergencyOverrideRecord with validation
+    fn entity_to_override(entity: &EmergencyOverrideEntity) -> LedgerResult<EmergencyOverrideRecord> {
+        let justification_type = Self::str_to_justification_type(&entity.justification_type)?;
+        let justification_digest = Self::parse_digest(&entity.justification_digest, "justification")?;
+        let action_taken_digest = Self::parse_digest(&entity.action_taken_digest, "action_taken")?;
+
+        let review_outcome_digest = match &entity.review_outcome_digest {
+            Some(d) => Some(Self::parse_digest(d, "review_outcome")?),
+            None => None,
+        };
+
+        Ok(EmergencyOverrideRecord {
             override_id: entity.override_id.clone(),
-            justification_type: Self::str_to_justification_type(&entity.justification_type),
-            justification_digest: Digest::from_hex(&entity.justification_digest).unwrap_or_default(),
+            justification_type,
+            justification_digest,
             overridden_consent_ref: entity.overridden_consent_ref.clone(),
             authorized_by: ActorId(entity.authorized_by.clone()),
             executed_by: ActorId(entity.executed_by.clone()),
             affected_actors: entity.affected_actors.iter().map(|s| ActorId(s.clone())).collect(),
-            action_taken_digest: Digest::from_hex(&entity.action_taken_digest).unwrap_or_default(),
+            action_taken_digest,
             initiated_at: entity.initiated_at,
             completed_at: entity.completed_at,
             review_deadline: entity.review_deadline,
             reviewed_by: entity.reviewed_by.as_ref().map(|s| ActorId(s.clone())),
-            review_outcome_digest: entity.review_outcome_digest.as_ref().and_then(|d| Digest::from_hex(d).ok()),
+            review_outcome_digest,
             receipt_id: entity.receipt_id.as_ref().map(|r| ReceiptId(r.clone())),
-        }
+        })
     }
 
-    /// Convert entity to CovenantStatus
-    fn entity_to_covenant(entity: &CovenantEntity) -> CovenantStatus {
-        CovenantStatus {
+    /// Convert entity to CovenantStatus with validation
+    fn entity_to_covenant(entity: &CovenantEntity) -> LedgerResult<CovenantStatus> {
+        let covenant_digest = Self::parse_digest(&entity.covenant_digest, "covenant")?;
+        let status = Self::str_to_consent_status(&entity.status)?;
+
+        let amendments_digest = match &entity.amendments_digest {
+            Some(d) => Some(Self::parse_digest(d, "amendments")?),
+            None => None,
+        };
+
+        Ok(CovenantStatus {
             covenant_id: entity.covenant_id.clone(),
             space_id: SpaceId(entity.space_id.clone()),
-            covenant_digest: Digest::from_hex(&entity.covenant_digest).unwrap_or_default(),
+            covenant_digest,
             signatories: entity.signatories.iter().map(|s| ActorId(s.clone())).collect(),
             effective_from: entity.effective_from,
-            status: Self::str_to_consent_status(&entity.status),
-            amendments_digest: entity.amendments_digest.as_ref().and_then(|d| Digest::from_hex(d).ok()),
+            status,
+            amendments_digest,
             receipt_id: entity.receipt_id.as_ref().map(|r| ReceiptId(r.clone())),
-        }
+        })
     }
 }
 
@@ -223,10 +320,316 @@ impl Ledger for ConsentService {
     }
 
     async fn current_root(&self) -> LedgerResult<Digest> {
-        Ok(Digest::zero())
+        let session = self.datastore.session().await.map_err(|e| {
+            LedgerError::Storage(format!("Failed to get session: {}", e))
+        })?;
+
+        // Query all consents
+        let query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant ORDER BY created_at ASC",
+            ConsentEntity::TABLE
+        );
+        let mut response = session
+            .client()
+            .query(&query)
+            .bind(("tenant", self.tenant_id.clone()))
+            .await
+            .map_err(|e| LedgerError::Storage(format!("Query failed: {}", e)))?;
+        let consents: Vec<ConsentEntity> = response
+            .take(0)
+            .map_err(|e| LedgerError::Storage(format!("Parse failed: {}", e)))?;
+
+        // Query all tickets
+        let query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant ORDER BY issued_at ASC",
+            AccessTicketEntity::TABLE
+        );
+        let mut response = session
+            .client()
+            .query(&query)
+            .bind(("tenant", self.tenant_id.clone()))
+            .await
+            .map_err(|e| LedgerError::Storage(format!("Query failed: {}", e)))?;
+        let tickets: Vec<AccessTicketEntity> = response
+            .take(0)
+            .map_err(|e| LedgerError::Storage(format!("Parse failed: {}", e)))?;
+
+        // Query all delegations
+        let query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant ORDER BY valid_from ASC",
+            DelegationEntity::TABLE
+        );
+        let mut response = session
+            .client()
+            .query(&query)
+            .bind(("tenant", self.tenant_id.clone()))
+            .await
+            .map_err(|e| LedgerError::Storage(format!("Query failed: {}", e)))?;
+        let delegations: Vec<DelegationEntity> = response
+            .take(0)
+            .map_err(|e| LedgerError::Storage(format!("Parse failed: {}", e)))?;
+
+        // Query all covenants
+        let query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant ORDER BY effective_from ASC",
+            CovenantEntity::TABLE
+        );
+        let mut response = session
+            .client()
+            .query(&query)
+            .bind(("tenant", self.tenant_id.clone()))
+            .await
+            .map_err(|e| LedgerError::Storage(format!("Query failed: {}", e)))?;
+        let covenants: Vec<CovenantEntity> = response
+            .take(0)
+            .map_err(|e| LedgerError::Storage(format!("Parse failed: {}", e)))?;
+
+        // Query all emergency overrides
+        let query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant ORDER BY initiated_at ASC",
+            EmergencyOverrideEntity::TABLE
+        );
+        let mut response = session
+            .client()
+            .query(&query)
+            .bind(("tenant", self.tenant_id.clone()))
+            .await
+            .map_err(|e| LedgerError::Storage(format!("Query failed: {}", e)))?;
+        let overrides: Vec<EmergencyOverrideEntity> = response
+            .take(0)
+            .map_err(|e| LedgerError::Storage(format!("Parse failed: {}", e)))?;
+
+        if consents.is_empty() && tickets.is_empty() && delegations.is_empty()
+            && covenants.is_empty() && overrides.is_empty() {
+            return Ok(Digest::zero());
+        }
+
+        let mut tree = IncrementalMerkleTree::new();
+
+        // Add consents to tree
+        for consent in &consents {
+            let data = format!(
+                "consent:{}:{}:{}:{}:{}",
+                consent.consent_id,
+                consent.grantor,
+                consent.grantee,
+                consent.consent_type,
+                consent.terms_digest
+            );
+            tree.add(Digest::blake3(data.as_bytes()));
+        }
+
+        // Add tickets to tree
+        for ticket in &tickets {
+            let data = format!(
+                "ticket:{}:{}:{}:{}",
+                ticket.ticket_id,
+                ticket.consent_ref,
+                ticket.holder,
+                ticket.ticket_digest
+            );
+            tree.add(Digest::blake3(data.as_bytes()));
+        }
+
+        // Add delegations to tree
+        for delegation in &delegations {
+            let data = format!(
+                "delegation:{}:{}:{}:{}",
+                delegation.delegation_id,
+                delegation.delegator,
+                delegation.delegate,
+                delegation.max_depth
+            );
+            tree.add(Digest::blake3(data.as_bytes()));
+        }
+
+        // Add covenants to tree
+        for covenant in &covenants {
+            let data = format!(
+                "covenant:{}:{}:{}:{}",
+                covenant.covenant_id,
+                covenant.space_id,
+                covenant.covenant_digest,
+                covenant.status
+            );
+            tree.add(Digest::blake3(data.as_bytes()));
+        }
+
+        // Add emergency overrides to tree
+        for override_record in &overrides {
+            let data = format!(
+                "override:{}:{}:{}:{}",
+                override_record.override_id,
+                override_record.authorized_by,
+                override_record.justification_type,
+                override_record.justification_digest
+            );
+            tree.add(Digest::blake3(data.as_bytes()));
+        }
+
+        Ok(tree.root())
     }
 
     async fn verify_integrity(&self) -> LedgerResult<bool> {
+        let session = self.datastore.session().await.map_err(|e| {
+            LedgerError::Storage(format!("Failed to get session: {}", e))
+        })?;
+
+        // Verify consents
+        let query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant",
+            ConsentEntity::TABLE
+        );
+        let mut response = session
+            .client()
+            .query(&query)
+            .bind(("tenant", self.tenant_id.clone()))
+            .await
+            .map_err(|e| LedgerError::Storage(format!("Query failed: {}", e)))?;
+        let consents: Vec<ConsentEntity> = response
+            .take(0)
+            .map_err(|e| LedgerError::Storage(format!("Parse failed: {}", e)))?;
+
+        let mut seen_consent_ids = HashSet::new();
+        for consent in &consents {
+            // Check for duplicate consent_ids
+            if !seen_consent_ids.insert(&consent.consent_id) {
+                return Ok(false);
+            }
+            // Check required fields
+            if consent.consent_id.is_empty() || consent.grantor.is_empty() || consent.grantee.is_empty() {
+                return Ok(false);
+            }
+            // Validate consent_type
+            if Self::str_to_consent_type(&consent.consent_type).is_err() {
+                return Ok(false);
+            }
+            // Validate status
+            if Self::str_to_consent_status(&consent.status).is_err() {
+                return Ok(false);
+            }
+        }
+
+        // Verify tickets
+        let query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant",
+            AccessTicketEntity::TABLE
+        );
+        let mut response = session
+            .client()
+            .query(&query)
+            .bind(("tenant", self.tenant_id.clone()))
+            .await
+            .map_err(|e| LedgerError::Storage(format!("Query failed: {}", e)))?;
+        let tickets: Vec<AccessTicketEntity> = response
+            .take(0)
+            .map_err(|e| LedgerError::Storage(format!("Parse failed: {}", e)))?;
+
+        let mut seen_ticket_ids = HashSet::new();
+        for ticket in &tickets {
+            // Check for duplicate ticket_ids
+            if !seen_ticket_ids.insert(&ticket.ticket_id) {
+                return Ok(false);
+            }
+            // Check required fields
+            if ticket.ticket_id.is_empty() || ticket.consent_ref.is_empty() || ticket.holder.is_empty() {
+                return Ok(false);
+            }
+        }
+
+        // Verify delegations
+        let query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant",
+            DelegationEntity::TABLE
+        );
+        let mut response = session
+            .client()
+            .query(&query)
+            .bind(("tenant", self.tenant_id.clone()))
+            .await
+            .map_err(|e| LedgerError::Storage(format!("Query failed: {}", e)))?;
+        let delegations: Vec<DelegationEntity> = response
+            .take(0)
+            .map_err(|e| LedgerError::Storage(format!("Parse failed: {}", e)))?;
+
+        let mut seen_delegation_ids = HashSet::new();
+        for delegation in &delegations {
+            // Check for duplicate delegation_ids
+            if !seen_delegation_ids.insert(&delegation.delegation_id) {
+                return Ok(false);
+            }
+            // Check required fields
+            if delegation.delegation_id.is_empty() || delegation.delegator.is_empty() || delegation.delegate.is_empty() {
+                return Ok(false);
+            }
+            // Validate depth constraints
+            if delegation.current_depth > delegation.max_depth {
+                return Ok(false);
+            }
+        }
+
+        // Verify covenants
+        let query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant",
+            CovenantEntity::TABLE
+        );
+        let mut response = session
+            .client()
+            .query(&query)
+            .bind(("tenant", self.tenant_id.clone()))
+            .await
+            .map_err(|e| LedgerError::Storage(format!("Query failed: {}", e)))?;
+        let covenants: Vec<CovenantEntity> = response
+            .take(0)
+            .map_err(|e| LedgerError::Storage(format!("Parse failed: {}", e)))?;
+
+        let mut seen_covenant_ids = HashSet::new();
+        for covenant in &covenants {
+            // Check for duplicate covenant_ids
+            if !seen_covenant_ids.insert(&covenant.covenant_id) {
+                return Ok(false);
+            }
+            // Check required fields
+            if covenant.covenant_id.is_empty() || covenant.space_id.is_empty() {
+                return Ok(false);
+            }
+            // Validate status
+            if Self::str_to_consent_status(&covenant.status).is_err() {
+                return Ok(false);
+            }
+        }
+
+        // Verify emergency overrides
+        let query = format!(
+            "SELECT *, type::string(id) AS id FROM {} WHERE tenant_id = $tenant",
+            EmergencyOverrideEntity::TABLE
+        );
+        let mut response = session
+            .client()
+            .query(&query)
+            .bind(("tenant", self.tenant_id.clone()))
+            .await
+            .map_err(|e| LedgerError::Storage(format!("Query failed: {}", e)))?;
+        let overrides: Vec<EmergencyOverrideEntity> = response
+            .take(0)
+            .map_err(|e| LedgerError::Storage(format!("Parse failed: {}", e)))?;
+
+        let mut seen_override_ids = HashSet::new();
+        for override_record in &overrides {
+            // Check for duplicate override_ids
+            if !seen_override_ids.insert(&override_record.override_id) {
+                return Ok(false);
+            }
+            // Check required fields
+            if override_record.override_id.is_empty() || override_record.authorized_by.is_empty() {
+                return Ok(false);
+            }
+            // Validate justification_type
+            if Self::str_to_justification_type(&override_record.justification_type).is_err() {
+                return Ok(false);
+            }
+        }
+
         Ok(true)
     }
 }
@@ -242,6 +645,14 @@ impl ConsentLedger for ConsentService {
         terms_digest: Digest,
         expires_at: Option<DateTime<Utc>>,
     ) -> LedgerResult<ConsentRecord> {
+        // Validate: Space cannot be grantor or grantee (only allowed as context_ref)
+        validate_not_space(&grantor.0, "grantor").map_err(|e| {
+            LedgerError::Validation(e.to_string())
+        })?;
+        validate_not_space(&grantee.0, "grantee").map_err(|e| {
+            LedgerError::Validation(e.to_string())
+        })?;
+
         let consent_id = self.generate_id("consent");
 
         let entity = ConsentEntity {
@@ -283,7 +694,7 @@ impl ConsentLedger for ConsentService {
             .map_err(|e| LedgerError::Storage(format!("Parse failed: {}", e)))?;
 
         let created = result.ok_or_else(|| LedgerError::Storage("Create returned no result".to_string()))?;
-        Ok(Self::entity_to_consent_record(&created))
+        Self::entity_to_consent_record(&created)
     }
 
     async fn revoke_consent(
@@ -337,7 +748,10 @@ impl ConsentLedger for ConsentService {
             .take(0)
             .map_err(|e| LedgerError::Storage(format!("Parse failed: {}", e)))?;
 
-        Ok(result.map(|e| Self::entity_to_consent_record(&e)))
+        match result {
+            Some(e) => Ok(Some(Self::entity_to_consent_record(&e)?)),
+            None => Ok(None),
+        }
     }
 
     async fn verify_consent(
@@ -431,7 +845,7 @@ impl ConsentLedger for ConsentService {
             .take(0)
             .map_err(|e| LedgerError::Storage(format!("Parse failed: {}", e)))?;
 
-        Ok(results.iter().map(Self::entity_to_consent_record).collect())
+        results.iter().map(Self::entity_to_consent_record).collect()
     }
 
     async fn list_received_consents(
@@ -470,7 +884,7 @@ impl ConsentLedger for ConsentService {
             .take(0)
             .map_err(|e| LedgerError::Storage(format!("Parse failed: {}", e)))?;
 
-        Ok(results.iter().map(Self::entity_to_consent_record).collect())
+        results.iter().map(Self::entity_to_consent_record).collect()
     }
 
     async fn issue_ticket(
@@ -527,7 +941,7 @@ impl ConsentLedger for ConsentService {
             .map_err(|e| LedgerError::Storage(format!("Parse failed: {}", e)))?;
 
         let created = result.ok_or_else(|| LedgerError::Storage("Create returned no result".to_string()))?;
-        Ok(Self::entity_to_ticket(&created))
+        Self::entity_to_ticket(&created)
     }
 
     async fn use_ticket(&self, ticket_id: &str) -> LedgerResult<bool> {
@@ -596,7 +1010,10 @@ impl ConsentLedger for ConsentService {
             .take(0)
             .map_err(|e| LedgerError::Storage(format!("Parse failed: {}", e)))?;
 
-        Ok(result.map(|e| Self::entity_to_ticket(&e)))
+        match result {
+            Some(e) => Ok(Some(Self::entity_to_ticket(&e)?)),
+            None => Ok(None),
+        }
     }
 
     async fn create_delegation(
@@ -790,7 +1207,7 @@ impl ConsentLedger for ConsentService {
             .take(0)
             .map_err(|e| LedgerError::Storage(format!("Parse failed: {}", e)))?;
 
-        Ok(results.iter().map(Self::entity_to_override).collect())
+        results.iter().map(Self::entity_to_override).collect()
     }
 
     async fn update_covenant(
@@ -855,7 +1272,7 @@ impl ConsentLedger for ConsentService {
                 .map_err(|e| LedgerError::Storage(format!("Create failed: {}", e)))?;
         }
 
-        Ok(Self::entity_to_covenant(&entity))
+        Self::entity_to_covenant(&entity)
     }
 
     async fn get_covenant(&self, space_id: &SpaceId) -> LedgerResult<Option<CovenantStatus>> {
@@ -881,6 +1298,9 @@ impl ConsentLedger for ConsentService {
             .take(0)
             .map_err(|e| LedgerError::Storage(format!("Parse failed: {}", e)))?;
 
-        Ok(result.map(|e| Self::entity_to_covenant(&e)))
+        match result {
+            Some(e) => Ok(Some(Self::entity_to_covenant(&e)?)),
+            None => Ok(None),
+        }
     }
 }
