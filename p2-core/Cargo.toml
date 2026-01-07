@@ -33,5 +33,25 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 # Encoding
 hex = { workspace = true }
 
+# Hashing
+sha2 = { workspace = true }
+
+# Random number generation
+getrandom = "0.2"
+
+# Zeroize secrets
+zeroize = "1"
+
+# HTTP client for Vault integration
+reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-features = false, optional = true }
+
+# Base64 encoding for Vault responses
+base64 = "0.21"
+
+[features]
+default = []
+vault = ["reqwest"]
+
 [dev-dependencies]
 tokio = { workspace = true }
+tempfile = "3.10"

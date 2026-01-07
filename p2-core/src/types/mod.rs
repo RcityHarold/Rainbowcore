@@ -23,7 +23,7 @@ pub use access_ticket::{
 pub use audit_artifacts::{
     AdditionalCheck, AuditSummary, ClientInfo, DecryptAuditLog, DecryptOutcome,
     ExportAuditLog, ExportDestinationType, ExportFormat, ReachabilityStatus, SamplingArtifact,
-    SamplingPolicy,
+    SamplingPolicy, TicketAuditLog, TicketOperation, TicketOperationOutcome,
 };
 pub use evidence_bundle::{
     EvidenceBundle, EvidenceBundleStatus, EvidenceLevel, EvidenceSubmission, EvidenceType,

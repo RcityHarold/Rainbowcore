@@ -42,10 +42,14 @@ pub async fn create_evidence_bundle(
         let checksum = Digest::from_hex(&metadata.checksum)
             .map_err(|e| ApiError::internal(format!("Invalid checksum format: {}", e)))?;
 
+        // Get or compute encryption metadata digest
+        let encryption_meta_digest = Digest::from_hex(&metadata.get_encryption_meta_digest())
+            .map_err(|e| ApiError::internal(format!("Invalid encryption meta digest: {}", e)))?;
+
         payload_refs.push(p2_core::types::SealedPayloadRef {
             ref_id: ref_id.clone(),
             checksum,
-            encryption_meta_digest: Digest::zero(),
+            encryption_meta_digest,
             access_policy_version: "v1".to_string(),
             size_bytes: metadata.size_bytes,
             status: metadata.status,

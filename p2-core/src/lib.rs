@@ -79,9 +79,22 @@ pub use types::{
 
 pub use ledger::{
     AuditLedger, EvidenceLedger, PayloadMetadata, PayloadStore, SnapshotLedger, TicketLedger,
+    // Indexing
+    CompositeIndex, IndexBuilder, IndexEntry, IndexEntryType, IndexStats, LedgerIndex,
+    SecondaryIndex, SecondaryKey, TimeIndex,
+    // WAL
+    RecoveryResult, SyncMode, WalConfig, WalEntry, WalEntryStatus, WalOperation, WalStats,
+    WalTarget, WriteAheadLog, LSN,
 };
 
-pub use crypto::{EnvelopeEncryption, SealedEnvelope};
+pub use crypto::{
+    EnvelopeEncryption, SealedEnvelope,
+    // KDF
+    derive_key, KdfAlgorithm, KdfParams, KeyContext, KeyDerivation,
+    // Key Rotation
+    KeyManager, KeyMetadata, KeyRotationStats, KeyStatus, KeyType,
+    ReEncryptionJob, ReEncryptionStatus, RotationConfig,
+};
 
 /// P2 version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

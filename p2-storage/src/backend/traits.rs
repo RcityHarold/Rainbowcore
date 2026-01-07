@@ -66,6 +66,8 @@ pub struct WriteMetadata {
     pub tags: Vec<String>,
     /// Owner actor ID
     pub owner_id: Option<String>,
+    /// Expected payload size (for routing decisions)
+    pub expected_size: Option<u64>,
 }
 
 impl Default for WriteMetadata {
@@ -77,6 +79,7 @@ impl Default for WriteMetadata {
             retention_policy_ref: None,
             tags: Vec::new(),
             owner_id: None,
+            expected_size: None,
         }
     }
 }
@@ -114,7 +117,7 @@ impl WriteMetadata {
 }
 
 /// Payload metadata (without content)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PayloadMetadata {
     /// Reference ID
     pub ref_id: String,
@@ -138,10 +141,37 @@ pub struct PayloadMetadata {
     pub owner_id: Option<String>,
     /// Tags
     pub tags: Vec<String>,
+    /// Encryption metadata digest (hex encoded Blake3 hash)
+    /// Used for integrity verification in SealedPayloadRef
+    #[serde(default)]
+    pub encryption_meta_digest: Option<String>,
+}
+
+impl PayloadMetadata {
+    /// Compute or retrieve the encryption metadata digest
+    ///
+    /// Returns the stored digest if available, otherwise computes
+    /// a deterministic digest from the encryption_key_version for
+    /// backward compatibility with legacy data.
+    pub fn get_encryption_meta_digest(&self) -> String {
+        if let Some(ref digest) = self.encryption_meta_digest {
+            digest.clone()
+        } else {
+            // Compute a deterministic digest from available encryption info
+            // This maintains backward compatibility with legacy data
+            use l0_core::types::Digest;
+            let meta_str = format!(
+                "encryption:v1:key_version={}",
+                self.encryption_key_version
+            );
+            Digest::blake3(meta_str.as_bytes()).to_hex()
+        }
+    }
 }
 
 /// Backend type identifier
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BackendType {
     /// Local filesystem
     Local,
@@ -149,10 +179,20 @@ pub enum BackendType {
     Ipfs,
     /// S3-compatible object storage
     S3Compatible,
+    /// S3 alias for routing
+    S3,
     /// In-memory (testing only)
     Memory,
+    /// Router (multi-backend)
+    Router,
     /// Custom backend
     Custom,
+}
+
+impl Default for BackendType {
+    fn default() -> Self {
+        Self::Local
+    }
 }
 
 impl BackendType {
@@ -161,8 +201,10 @@ impl BackendType {
         match self {
             Self::Local => "local",
             Self::Ipfs => "ipfs",
-            Self::S3Compatible => "s3",
+            Self::S3Compatible => "s3_compatible",
+            Self::S3 => "s3",
             Self::Memory => "memory",
+            Self::Router => "router",
             Self::Custom => "custom",
         }
     }
@@ -279,5 +321,81 @@ impl HealthStatus {
             used_bytes: None,
             checked_at: Utc::now(),
         }
+    }
+
+    /// Create degraded status (partially healthy)
+    pub fn degraded(message: &str) -> Self {
+        Self {
+            healthy: true, // Still operational
+            message: message.to_string(),
+            available_bytes: None,
+            used_bytes: None,
+            checked_at: Utc::now(),
+        }
+    }
+
+    /// Check if status is healthy
+    pub fn is_healthy(&self) -> bool {
+        self.healthy
+    }
+
+    /// Get status message
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+// ============================================================================
+// Blanket implementation for Arc<T>
+// ============================================================================
+
+use std::sync::Arc;
+
+/// Blanket implementation of P2StorageBackend for Arc<T>
+/// This allows using Arc<LocalStorageBackend> directly in contexts requiring P2StorageBackend
+#[async_trait]
+impl<T: P2StorageBackend + ?Sized> P2StorageBackend for Arc<T> {
+    async fn write(&self, data: &[u8], metadata: WriteMetadata) -> StorageResult<SealedPayloadRef> {
+        (**self).write(data, metadata).await
+    }
+
+    async fn read(&self, ref_id: &str) -> StorageResult<Vec<u8>> {
+        (**self).read(ref_id).await
+    }
+
+    async fn exists(&self, ref_id: &str) -> StorageResult<bool> {
+        (**self).exists(ref_id).await
+    }
+
+    async fn get_metadata(&self, ref_id: &str) -> StorageResult<PayloadMetadata> {
+        (**self).get_metadata(ref_id).await
+    }
+
+    async fn tombstone(&self, ref_id: &str) -> StorageResult<()> {
+        (**self).tombstone(ref_id).await
+    }
+
+    async fn migrate_temperature(
+        &self,
+        ref_id: &str,
+        target_temp: StorageTemperature,
+    ) -> StorageResult<SealedPayloadRef> {
+        (**self).migrate_temperature(ref_id, target_temp).await
+    }
+
+    async fn verify_integrity(&self, ref_id: &str) -> StorageResult<IntegrityResult> {
+        (**self).verify_integrity(ref_id).await
+    }
+
+    fn backend_type(&self) -> BackendType {
+        (**self).backend_type()
+    }
+
+    fn capabilities(&self) -> BackendCapabilities {
+        (**self).capabilities()
+    }
+
+    async fn health_check(&self) -> StorageResult<HealthStatus> {
+        (**self).health_check().await
     }
 }

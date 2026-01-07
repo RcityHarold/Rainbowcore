@@ -93,16 +93,36 @@ impl PayloadSelector {
             // Full is not subset of anything except Full
             (SelectorType::Full, _) => false,
             // Same type requires expression comparison
+            (SelectorType::Span, SelectorType::Span) => self.span_is_subset(other),
+            (SelectorType::ByteRange, SelectorType::ByteRange) => self.range_is_subset(other),
             (a, b) if a == b => self.expr_is_subset(&self.selector_expr, &other.selector_expr),
             // Different types - need specific logic
             _ => false,
         }
     }
 
-    /// Check if expression a is subset of expression b (simplified)
+    /// Check if this span is a subset of another span
+    fn span_is_subset(&self, other: &PayloadSelector) -> bool {
+        match (self.parse_span(), other.parse_span()) {
+            (Some((a_start, a_end)), Some((b_start, b_end))) => {
+                a_start >= b_start && a_end <= b_end
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if this byte range is a subset of another byte range
+    fn range_is_subset(&self, other: &PayloadSelector) -> bool {
+        match (self.parse_byte_range(), other.parse_byte_range()) {
+            (Some((a_start, a_end)), Some((b_start, b_end))) => {
+                a_start >= b_start && a_end <= b_end
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if expression a is subset of expression b (for non-range types)
     fn expr_is_subset(&self, a: &str, b: &str) -> bool {
-        // Simple equality check for now
-        // TODO: Implement proper subset logic for ranges and fields
         a == b || b == "*"
     }
 

@@ -37,8 +37,18 @@
 //! ```
 
 pub mod backend;
+pub mod compliance;
+pub mod config;
 pub mod error;
+pub mod failover;
+pub mod health_monitor;
+pub mod ops;
+pub mod replication;
 pub mod retention;
+pub mod router;
+pub mod routing_policy;
+pub mod services;
+pub mod telemetry;
 pub mod temperature;
 
 pub use backend::{
@@ -50,9 +60,58 @@ pub use retention::{
     LegalHold, LegalHoldManager, LegalHoldStatus, RetentionChecker, RetentionGC,
     RetentionPolicy, RetentionPolicyConfig, RetentionRule,
 };
+pub use services::{
+    Alert, AlertConfig, AlertHandler, AlertManager, AlertSeverity, AlertType, AuditChain,
+    AuditChainEntry, AuditQuery, AuditQueryResult, AuditStore, AuditStoreConfig, FailureDetail,
+    FailureSeverity, HealthStatus as SamplingHealthStatus, InMemoryMetadataProvider,
+    IntegrityCheckResult, IntegrityCheckType, IntegrityChecker, IntegrityCheckerConfig,
+    IntegrityStats, PayloadMetadataProvider, PayloadSampleInfo, PayloadSampler, SamplingReport,
+    SamplingReportBuilder, SamplingRunStatus, SamplingScheduler, SamplingSchedulerConfig,
+    SamplingSchedulerState, SamplingStrategy, SamplingSummary, SelectedSample, TemperatureTier,
+};
+pub use replication::{
+    AsyncReplicator, BatchConsistencyResult, ConsistencyCheckConfig, ConsistencyCheckResult,
+    ConsistencyChecker, ConsistencyLevel, MockReplicaClient, NodeHealthStatus, QueueStatus,
+    RepairAction, ReplicaClient, ReplicaNodeConfig, ReplicaStatus, ReplicationConfig,
+    ReplicationFactorConfig, ReplicationManager, ReplicationManagerState, ReplicationMode,
+    ReplicationTask, ReplicationWriteOptions, RetryConfig, SyncReplicationResult, SyncReplicator,
+};
+pub use telemetry::{
+    Counter, Gauge, Histogram, LogConfig, LogFormat, LogLevel, MetricsConfig, MetricsRegistry,
+    ReplicationMetrics, SamplingMetrics, StorageMetrics, TraceContext, TracingConfig,
+};
 pub use temperature::{
     MigrationBatch, MigrationCandidate, MigrationProgress, MigrationResult, MigrationStatus,
     TemperaturePolicy, TemperaturePolicyConfig, TemperaturePolicyExecutor,
+};
+pub use failover::{FailoverConfig, FailoverEvent, FailoverManager, FailoverState, FailoverStats};
+pub use health_monitor::{
+    BackendHealth, BackendHealthSummary, HealthCheckResult, HealthMonitor, HealthMonitorConfig,
+    HealthSummary,
+};
+pub use router::{BackendRouter, BackendStats, RouterConfig, RouterStats};
+pub use routing_policy::{
+    CompositePolicy, ContentTypePolicy, ContentTypeRule, PrimaryBackupPolicy, RoundRobinPolicy,
+    RoutingDecision, RoutingPolicy, SizeBasedPolicy, TemperatureBasedPolicy,
+};
+pub use config::{
+    BackendSelection, ConfigError, ConfigReloader, ConfigValidator, EnvOverride,
+    GeneralConfig, LocalStorageConfig, MetricsServerConfig, P2StorageConfig, SecurityConfig,
+    StorageConfig, TelemetryConfig, ValidationError, ValidationResult,
+};
+pub use ops::{
+    BackendStats as OpsBackendStats, ConfigUpdate, ControlStatus, DiagnosticItem,
+    DiagnosticLevel, DiagnosticReport, DiagnosticResult, HealthCheck,
+    HealthCheckResult as OpsHealthCheckResult, HealthEndpoint, HealthResponse,
+    HealthStatus as OpsHealthStatus, MaintenanceMode, OperationControl, OperationStats,
+    PerformanceStats, ShutdownRequest, StatsCollector, StatsResponse, StorageStats,
+    SystemDiagnostics, SystemHealth, ThroughputStats,
+};
+pub use compliance::{
+    AuditEventType, ComplianceAuditEntry, ComplianceAuditLog, ComplianceCheckResult,
+    ComplianceChecker, ComplianceContext, CompliancePolicy, ComplianceRule, ComplianceRuleSet,
+    ComplianceStatus, PolicyAction, PolicyCondition, PolicyEnforcer, PolicyViolation,
+    RuleCategory, RuleSeverity, RuleViolation,
 };
 
 /// Storage version

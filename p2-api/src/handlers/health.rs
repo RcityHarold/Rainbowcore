@@ -16,15 +16,25 @@ use p2_storage::P2StorageBackend;
 pub async fn health_check(State(state): State<AppState>) -> ApiResult<Json<HealthResponse>> {
     let storage_health = state.storage.health_check().await?;
 
+    // Check L0 bridge health
+    let bridge_health = state.l0_client.health_check().await;
+    let bridge_healthy = bridge_health
+        .map(|h| h.available)
+        .unwrap_or(false);
+
+    // Determine overall status
+    let status = match (storage_health.healthy, bridge_healthy) {
+        (true, true) => "healthy",
+        (true, false) => "degraded", // Storage OK but bridge down
+        (false, true) => "degraded", // Bridge OK but storage down
+        (false, false) => "unhealthy",
+    };
+
     let response = HealthResponse {
-        status: if storage_health.healthy {
-            "healthy".to_string()
-        } else {
-            "degraded".to_string()
-        },
+        status: status.to_string(),
         version: crate::VERSION.to_string(),
         storage_healthy: storage_health.healthy,
-        bridge_healthy: true, // TODO: Add bridge health check
+        bridge_healthy,
         timestamp: Utc::now(),
     };
 
@@ -49,17 +59,23 @@ pub async fn readiness(State(state): State<AppState>) -> ApiResult<&'static str>
 }
 
 /// Get storage statistics
+///
+/// Note: Detailed storage statistics require scanning the storage backend.
+/// The returned values may be estimates or unavailable for some backends.
 pub async fn storage_stats(State(state): State<AppState>) -> ApiResult<Json<StorageStatsResponse>> {
-    let _capabilities = state.storage.capabilities();
+    let health = state.storage.health_check().await?;
 
-    // In a real implementation, we'd query actual stats
+    // Use available data from health check
+    // Note: Full statistics would require a dedicated index or scan
     let response = StorageStatsResponse {
-        total_payloads: 0,
-        total_size_bytes: 0,
-        hot_count: 0,
-        warm_count: 0,
-        cold_count: 0,
-        backend_type: format!("{:?}", state.storage.backend_type()),
+        total_payloads: None, // Not available without index scan
+        total_size_bytes: health.used_bytes,
+        available_bytes: health.available_bytes,
+        hot_count: None,
+        warm_count: None,
+        cold_count: None,
+        backend_type: state.storage.backend_type().to_string(),
+        backend_healthy: health.healthy,
     };
 
     Ok(Json(response))

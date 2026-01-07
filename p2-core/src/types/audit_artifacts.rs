@@ -387,6 +387,221 @@ impl Default for SamplingPolicy {
     }
 }
 
+/// Ticket Audit Log - Records all ticket lifecycle events
+///
+/// This is a mandatory audit record for ticket operations.
+/// All ticket issuance, use, and revocation MUST be logged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TicketAuditLog {
+    /// Log ID
+    pub log_id: String,
+
+    /// Ticket ID being operated on
+    pub ticket_id: String,
+
+    /// Operation type
+    pub operation: TicketOperation,
+
+    /// Actor performing the operation
+    pub actor: ActorId,
+
+    /// Target resource reference (for issue/use operations)
+    pub target_resource_ref: Option<String>,
+
+    /// Ticket holder (for issue operations)
+    pub holder: Option<ActorId>,
+
+    /// Operation timestamp
+    pub timestamp: DateTime<Utc>,
+
+    /// Operation outcome
+    pub outcome: TicketOperationOutcome,
+
+    /// Reason (for revocation or failure)
+    pub reason: Option<String>,
+
+    /// Ticket permissions (for issue operations)
+    pub permissions: Vec<String>,
+
+    /// Ticket validity duration (seconds, for issue operations)
+    pub validity_seconds: Option<u32>,
+
+    /// Usage count after operation (for use operations)
+    pub usage_count: Option<u32>,
+
+    /// Remaining uses (for use operations)
+    pub remaining_uses: Option<u32>,
+
+    /// Consent reference (for issue operations)
+    pub consent_ref: Option<String>,
+
+    /// Client information
+    pub client_info: Option<ClientInfo>,
+}
+
+impl TicketAuditLog {
+    /// Create a new ticket audit log for issuance
+    pub fn issue(
+        log_id: String,
+        ticket_id: String,
+        issuer: ActorId,
+        holder: ActorId,
+        target_resource_ref: String,
+        permissions: Vec<String>,
+        validity_seconds: u32,
+        consent_ref: Option<String>,
+    ) -> Self {
+        Self {
+            log_id,
+            ticket_id,
+            operation: TicketOperation::Issue,
+            actor: issuer,
+            target_resource_ref: Some(target_resource_ref),
+            holder: Some(holder),
+            timestamp: Utc::now(),
+            outcome: TicketOperationOutcome::Success,
+            reason: None,
+            permissions,
+            validity_seconds: Some(validity_seconds),
+            usage_count: None,
+            remaining_uses: None,
+            consent_ref,
+            client_info: None,
+        }
+    }
+
+    /// Create a new ticket audit log for usage
+    pub fn use_ticket(
+        log_id: String,
+        ticket_id: String,
+        user: ActorId,
+        target_resource_ref: String,
+        usage_count: u32,
+        remaining_uses: Option<u32>,
+    ) -> Self {
+        Self {
+            log_id,
+            ticket_id,
+            operation: TicketOperation::Use,
+            actor: user,
+            target_resource_ref: Some(target_resource_ref),
+            holder: None,
+            timestamp: Utc::now(),
+            outcome: TicketOperationOutcome::Success,
+            reason: None,
+            permissions: Vec::new(),
+            validity_seconds: None,
+            usage_count: Some(usage_count),
+            remaining_uses,
+            consent_ref: None,
+            client_info: None,
+        }
+    }
+
+    /// Create a new ticket audit log for revocation
+    pub fn revoke(
+        log_id: String,
+        ticket_id: String,
+        revoker: ActorId,
+        reason: String,
+    ) -> Self {
+        Self {
+            log_id,
+            ticket_id,
+            operation: TicketOperation::Revoke,
+            actor: revoker,
+            target_resource_ref: None,
+            holder: None,
+            timestamp: Utc::now(),
+            outcome: TicketOperationOutcome::Success,
+            reason: Some(reason),
+            permissions: Vec::new(),
+            validity_seconds: None,
+            usage_count: None,
+            remaining_uses: None,
+            consent_ref: None,
+            client_info: None,
+        }
+    }
+
+    /// Create a failed operation log
+    pub fn failed(
+        log_id: String,
+        ticket_id: String,
+        operation: TicketOperation,
+        actor: ActorId,
+        outcome: TicketOperationOutcome,
+        reason: String,
+    ) -> Self {
+        Self {
+            log_id,
+            ticket_id,
+            operation,
+            actor,
+            target_resource_ref: None,
+            holder: None,
+            timestamp: Utc::now(),
+            outcome,
+            reason: Some(reason),
+            permissions: Vec::new(),
+            validity_seconds: None,
+            usage_count: None,
+            remaining_uses: None,
+            consent_ref: None,
+            client_info: None,
+        }
+    }
+
+    /// Set client information
+    pub fn with_client_info(mut self, client_info: ClientInfo) -> Self {
+        self.client_info = Some(client_info);
+        self
+    }
+
+    /// Check if operation was successful
+    pub fn is_success(&self) -> bool {
+        matches!(self.outcome, TicketOperationOutcome::Success)
+    }
+}
+
+/// Ticket operation type
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TicketOperation {
+    /// Ticket issuance
+    Issue,
+    /// Ticket usage (access)
+    Use,
+    /// Ticket revocation
+    Revoke,
+    /// Permission check
+    PermissionCheck,
+    /// Ticket refresh
+    Refresh,
+}
+
+/// Ticket operation outcome
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TicketOperationOutcome {
+    /// Operation successful
+    Success,
+    /// Ticket not found
+    NotFound,
+    /// Ticket expired
+    Expired,
+    /// Ticket already revoked
+    AlreadyRevoked,
+    /// Ticket exhausted (max uses reached)
+    Exhausted,
+    /// Permission denied
+    PermissionDenied,
+    /// Invalid request
+    InvalidRequest,
+    /// Internal error
+    InternalError,
+}
+
 /// Audit summary for a time period
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditSummary {

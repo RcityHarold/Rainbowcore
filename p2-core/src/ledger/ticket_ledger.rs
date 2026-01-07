@@ -2,6 +2,7 @@
 //!
 //! Persistent storage for access tickets.
 //! All payload access MUST go through a valid ticket.
+//! All data is encrypted at rest using the encrypted_storage module.
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -12,6 +13,7 @@ use std::path::PathBuf;
 use tokio::fs;
 use tokio::sync::RwLock;
 
+use super::encrypted_storage::{EncryptedStorage, EncryptedStorageConfig};
 use super::traits::TicketLedger;
 use crate::error::{P2Error, P2Result};
 use crate::types::{
@@ -31,7 +33,7 @@ struct TicketIndexEntry {
     status: TicketStatus,
 }
 
-/// File-based ticket ledger implementation
+/// File-based ticket ledger implementation with encryption at rest
 pub struct FileTicketLedger {
     /// Base path for ticket storage
     base_path: PathBuf,
@@ -41,14 +43,24 @@ pub struct FileTicketLedger {
     index_path: PathBuf,
     /// In-memory index cache
     index_cache: RwLock<HashMap<String, TicketIndexEntry>>,
+    /// Encrypted storage handler
+    storage: EncryptedStorage,
 }
 
 impl FileTicketLedger {
-    /// Create a new file-based ticket ledger
+    /// Create a new file-based ticket ledger with default encryption
     pub async fn new(base_path: impl Into<PathBuf>) -> P2Result<Self> {
+        Self::with_config(base_path, EncryptedStorageConfig::default()).await
+    }
+
+    /// Create with custom encryption config
+    pub async fn with_config(
+        base_path: impl Into<PathBuf>,
+        encryption_config: EncryptedStorageConfig,
+    ) -> P2Result<Self> {
         let base_path = base_path.into();
         let tickets_path = base_path.join("tickets");
-        let index_path = base_path.join("ticket_index.json");
+        let index_path = base_path.join("ticket_index.enc");
 
         // Create directories
         for path in [&base_path, &tickets_path] {
@@ -57,12 +69,14 @@ impl FileTicketLedger {
             })?;
         }
 
+        let storage = EncryptedStorage::new(encryption_config);
+
         // Load or create index
         let index_cache = if index_path.exists() {
-            let data = fs::read_to_string(&index_path).await.map_err(|e| {
-                P2Error::Storage(format!("Failed to read ticket index: {}", e))
-            })?;
-            let entries: Vec<TicketIndexEntry> = serde_json::from_str(&data).unwrap_or_default();
+            let entries: Vec<TicketIndexEntry> = storage
+                .read(&index_path, "ticket-ledger-index")
+                .await
+                .unwrap_or_default();
             let mut map = HashMap::new();
             for entry in entries {
                 map.insert(entry.ticket_id.clone(), entry);
@@ -77,10 +91,17 @@ impl FileTicketLedger {
             tickets_path,
             index_path,
             index_cache,
+            storage,
         })
     }
 
-    /// Save the index to disk
+    /// Create with encryption disabled (for testing only)
+    #[cfg(test)]
+    pub async fn unencrypted(base_path: impl Into<PathBuf>) -> P2Result<Self> {
+        Self::with_config(base_path, EncryptedStorageConfig::unencrypted()).await
+    }
+
+    /// Save the index to disk (encrypted)
     async fn save_index(&self) -> P2Result<()> {
         let entries: Vec<_> = self
             .index_cache
@@ -90,48 +111,30 @@ impl FileTicketLedger {
             .cloned()
             .collect();
 
-        let json = serde_json::to_string_pretty(&entries)
-            .map_err(|e| P2Error::Storage(format!("Serialization error: {}", e)))?;
-
-        fs::write(&self.index_path, json).await.map_err(|e| {
-            P2Error::Storage(format!("Failed to write ticket index: {}", e))
-        })?;
-
-        Ok(())
+        self.storage
+            .write(&self.index_path, &entries, "ticket-ledger-index")
+            .await
     }
 
     /// Get the file path for a ticket
     fn ticket_file_path(&self, ticket_id: &str) -> PathBuf {
-        self.tickets_path.join(format!("{}.json", ticket_id))
+        self.tickets_path.join(format!("{}.enc", ticket_id))
     }
 
-    /// Write ticket to disk
+    /// Write ticket to disk (encrypted)
     async fn write_ticket(&self, ticket: &AccessTicket) -> P2Result<()> {
-        let json = serde_json::to_string_pretty(&ticket)
-            .map_err(|e| P2Error::Storage(format!("Serialization error: {}", e)))?;
-
         let path = self.ticket_file_path(&ticket.ticket_id);
-        fs::write(&path, json).await.map_err(|e| {
-            P2Error::Storage(format!("Failed to write ticket: {}", e))
-        })?;
-
-        Ok(())
+        self.storage.write(&path, ticket, &ticket.ticket_id).await
     }
 
-    /// Read ticket from disk
+    /// Read ticket from disk (encrypted)
     async fn read_ticket(&self, ticket_id: &str) -> P2Result<Option<AccessTicket>> {
         let path = self.ticket_file_path(ticket_id);
         if !path.exists() {
             return Ok(None);
         }
 
-        let json = fs::read_to_string(&path).await.map_err(|e| {
-            P2Error::Storage(format!("Failed to read ticket: {}", e))
-        })?;
-
-        let ticket: AccessTicket = serde_json::from_str(&json)
-            .map_err(|e| P2Error::Storage(format!("Failed to parse ticket: {}", e)))?;
-
+        let ticket: AccessTicket = self.storage.read(&path, ticket_id).await?;
         Ok(Some(ticket))
     }
 }
@@ -349,7 +352,7 @@ mod tests {
     #[tokio::test]
     async fn test_issue_and_get_ticket() {
         let temp_dir = TempDir::new().unwrap();
-        let ledger = FileTicketLedger::new(temp_dir.path()).await.unwrap();
+        let ledger = FileTicketLedger::unencrypted(temp_dir.path()).await.unwrap();
 
         let issuer = ActorId::new("actor:issuer");
         let request = create_test_request();
@@ -365,7 +368,7 @@ mod tests {
     #[tokio::test]
     async fn test_use_ticket() {
         let temp_dir = TempDir::new().unwrap();
-        let ledger = FileTicketLedger::new(temp_dir.path()).await.unwrap();
+        let ledger = FileTicketLedger::unencrypted(temp_dir.path()).await.unwrap();
 
         let issuer = ActorId::new("actor:issuer");
         let request = create_test_request();
@@ -385,7 +388,7 @@ mod tests {
     #[tokio::test]
     async fn test_one_time_ticket() {
         let temp_dir = TempDir::new().unwrap();
-        let ledger = FileTicketLedger::new(temp_dir.path()).await.unwrap();
+        let ledger = FileTicketLedger::unencrypted(temp_dir.path()).await.unwrap();
 
         let issuer = ActorId::new("actor:issuer");
         let mut request = create_test_request();
@@ -405,7 +408,7 @@ mod tests {
     #[tokio::test]
     async fn test_revoke_ticket() {
         let temp_dir = TempDir::new().unwrap();
-        let ledger = FileTicketLedger::new(temp_dir.path()).await.unwrap();
+        let ledger = FileTicketLedger::unencrypted(temp_dir.path()).await.unwrap();
 
         let issuer = ActorId::new("actor:issuer");
         let request = create_test_request();
@@ -428,7 +431,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_tickets_by_holder() {
         let temp_dir = TempDir::new().unwrap();
-        let ledger = FileTicketLedger::new(temp_dir.path()).await.unwrap();
+        let ledger = FileTicketLedger::unencrypted(temp_dir.path()).await.unwrap();
 
         let issuer = ActorId::new("actor:issuer");
         let holder = ActorId::new("actor:holder");
@@ -446,7 +449,7 @@ mod tests {
     #[tokio::test]
     async fn test_check_permission() {
         let temp_dir = TempDir::new().unwrap();
-        let ledger = FileTicketLedger::new(temp_dir.path()).await.unwrap();
+        let ledger = FileTicketLedger::unencrypted(temp_dir.path()).await.unwrap();
 
         let issuer = ActorId::new("actor:issuer");
         let request = create_test_request();

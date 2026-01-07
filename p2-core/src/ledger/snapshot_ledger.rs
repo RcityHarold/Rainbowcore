@@ -1,6 +1,7 @@
 //! Snapshot Ledger Implementation
 //!
 //! Persistent storage for R0/R1 resurrection snapshots.
+//! All data is encrypted at rest using the encrypted_storage module.
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -11,6 +12,7 @@ use std::path::PathBuf;
 use tokio::fs;
 use tokio::sync::RwLock;
 
+use super::encrypted_storage::{EncryptedStorage, EncryptedStorageConfig};
 use super::traits::SnapshotLedger;
 use crate::error::{P2Error, P2Result};
 use crate::types::{FullResurrectionSnapshot, SkeletonSnapshot};
@@ -30,7 +32,7 @@ enum SnapshotIndexType {
     R1,
 }
 
-/// File-based snapshot ledger implementation
+/// File-based snapshot ledger implementation with encryption at rest
 pub struct FileSnapshotLedger {
     /// Base path for snapshot storage
     base_path: PathBuf,
@@ -42,15 +44,25 @@ pub struct FileSnapshotLedger {
     index_path: PathBuf,
     /// In-memory index cache
     index_cache: RwLock<HashMap<String, SnapshotIndexEntry>>,
+    /// Encrypted storage handler
+    storage: EncryptedStorage,
 }
 
 impl FileSnapshotLedger {
-    /// Create a new file-based snapshot ledger
+    /// Create a new file-based snapshot ledger with default encryption
     pub async fn new(base_path: impl Into<PathBuf>) -> P2Result<Self> {
+        Self::with_config(base_path, EncryptedStorageConfig::default()).await
+    }
+
+    /// Create with custom encryption config
+    pub async fn with_config(
+        base_path: impl Into<PathBuf>,
+        encryption_config: EncryptedStorageConfig,
+    ) -> P2Result<Self> {
         let base_path = base_path.into();
         let r0_path = base_path.join("r0");
         let r1_path = base_path.join("r1");
-        let index_path = base_path.join("index.json");
+        let index_path = base_path.join("index.enc");
 
         // Create directories
         for path in [&base_path, &r0_path, &r1_path] {
@@ -59,12 +71,14 @@ impl FileSnapshotLedger {
             })?;
         }
 
+        let storage = EncryptedStorage::new(encryption_config);
+
         // Load or create index
         let index_cache = if index_path.exists() {
-            let data = fs::read_to_string(&index_path).await.map_err(|e| {
-                P2Error::Storage(format!("Failed to read index: {}", e))
-            })?;
-            let entries: Vec<SnapshotIndexEntry> = serde_json::from_str(&data).unwrap_or_default();
+            let entries: Vec<SnapshotIndexEntry> = storage
+                .read(&index_path, "snapshot-ledger-index")
+                .await
+                .unwrap_or_default();
             let mut map = HashMap::new();
             for entry in entries {
                 map.insert(entry.snapshot_id.clone(), entry);
@@ -80,10 +94,17 @@ impl FileSnapshotLedger {
             r1_path,
             index_path,
             index_cache,
+            storage,
         })
     }
 
-    /// Save the index to disk
+    /// Create with encryption disabled (for testing only)
+    #[cfg(test)]
+    pub async fn unencrypted(base_path: impl Into<PathBuf>) -> P2Result<Self> {
+        Self::with_config(base_path, EncryptedStorageConfig::unencrypted()).await
+    }
+
+    /// Save the index to disk (encrypted)
     async fn save_index(&self) -> P2Result<()> {
         let entries: Vec<_> = self
             .index_cache
@@ -93,24 +114,19 @@ impl FileSnapshotLedger {
             .cloned()
             .collect();
 
-        let json = serde_json::to_string_pretty(&entries)
-            .map_err(|e| P2Error::Storage(format!("Serialization error: {}", e)))?;
-
-        fs::write(&self.index_path, json).await.map_err(|e| {
-            P2Error::Storage(format!("Failed to write index: {}", e))
-        })?;
-
-        Ok(())
+        self.storage
+            .write(&self.index_path, &entries, "snapshot-ledger-index")
+            .await
     }
 
     /// Get the file path for an R0 snapshot
     fn r0_file_path(&self, snapshot_id: &str) -> PathBuf {
-        self.r0_path.join(format!("{}.json", snapshot_id))
+        self.r0_path.join(format!("{}.enc", snapshot_id))
     }
 
     /// Get the file path for an R1 snapshot
     fn r1_file_path(&self, snapshot_id: &str) -> PathBuf {
-        self.r1_path.join(format!("{}.json", snapshot_id))
+        self.r1_path.join(format!("{}.enc", snapshot_id))
     }
 }
 
@@ -120,14 +136,9 @@ impl SnapshotLedger for FileSnapshotLedger {
         let snapshot_id = snapshot.snapshot_id.clone();
         let actor_id = snapshot.actor_id.0.clone();
 
-        // Serialize and write
-        let json = serde_json::to_string_pretty(&snapshot)
-            .map_err(|e| P2Error::Storage(format!("Serialization error: {}", e)))?;
-
+        // Write encrypted snapshot
         let path = self.r0_file_path(&snapshot_id);
-        fs::write(&path, json).await.map_err(|e| {
-            P2Error::Storage(format!("Failed to write R0 snapshot: {}", e))
-        })?;
+        self.storage.write(&path, &snapshot, &snapshot_id).await?;
 
         // Update index
         {
@@ -152,14 +163,9 @@ impl SnapshotLedger for FileSnapshotLedger {
         let snapshot_id = snapshot.snapshot_id.clone();
         let actor_id = snapshot.actor_id.0.clone();
 
-        // Serialize and write
-        let json = serde_json::to_string_pretty(&snapshot)
-            .map_err(|e| P2Error::Storage(format!("Serialization error: {}", e)))?;
-
+        // Write encrypted snapshot
         let path = self.r1_file_path(&snapshot_id);
-        fs::write(&path, json).await.map_err(|e| {
-            P2Error::Storage(format!("Failed to write R1 snapshot: {}", e))
-        })?;
+        self.storage.write(&path, &snapshot, &snapshot_id).await?;
 
         // Update index
         {
@@ -186,13 +192,7 @@ impl SnapshotLedger for FileSnapshotLedger {
             return Ok(None);
         }
 
-        let json = fs::read_to_string(&path).await.map_err(|e| {
-            P2Error::Storage(format!("Failed to read R0 snapshot: {}", e))
-        })?;
-
-        let snapshot: SkeletonSnapshot = serde_json::from_str(&json)
-            .map_err(|e| P2Error::Storage(format!("Failed to parse R0 snapshot: {}", e)))?;
-
+        let snapshot: SkeletonSnapshot = self.storage.read(&path, snapshot_id).await?;
         Ok(Some(snapshot))
     }
 
@@ -202,13 +202,7 @@ impl SnapshotLedger for FileSnapshotLedger {
             return Ok(None);
         }
 
-        let json = fs::read_to_string(&path).await.map_err(|e| {
-            P2Error::Storage(format!("Failed to read R1 snapshot: {}", e))
-        })?;
-
-        let snapshot: FullResurrectionSnapshot = serde_json::from_str(&json)
-            .map_err(|e| P2Error::Storage(format!("Failed to parse R1 snapshot: {}", e)))?;
-
+        let snapshot: FullResurrectionSnapshot = self.storage.read(&path, snapshot_id).await?;
         Ok(Some(snapshot))
     }
 
@@ -371,7 +365,7 @@ mod tests {
     #[tokio::test]
     async fn test_store_and_get_r0() {
         let temp_dir = TempDir::new().unwrap();
-        let ledger = FileSnapshotLedger::new(temp_dir.path()).await.unwrap();
+        let ledger = FileSnapshotLedger::unencrypted(temp_dir.path()).await.unwrap();
 
         let snapshot = create_test_r0();
         let snapshot_id = snapshot.snapshot_id.clone();
@@ -386,7 +380,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_r0_for_actor() {
         let temp_dir = TempDir::new().unwrap();
-        let ledger = FileSnapshotLedger::new(temp_dir.path()).await.unwrap();
+        let ledger = FileSnapshotLedger::unencrypted(temp_dir.path()).await.unwrap();
 
         // Store multiple snapshots for same actor
         for _ in 0..3 {
@@ -402,7 +396,7 @@ mod tests {
     #[tokio::test]
     async fn test_verify_snapshot() {
         let temp_dir = TempDir::new().unwrap();
-        let ledger = FileSnapshotLedger::new(temp_dir.path()).await.unwrap();
+        let ledger = FileSnapshotLedger::unencrypted(temp_dir.path()).await.unwrap();
 
         let snapshot = create_test_r0();
         let snapshot_id = snapshot.snapshot_id.clone();

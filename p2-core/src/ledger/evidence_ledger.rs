@@ -1,6 +1,7 @@
 //! Evidence Ledger Implementation
 //!
 //! Persistent storage for evidence bundles with P1 commitment tracking.
+//! All data is encrypted at rest using the encrypted_storage module.
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -11,6 +12,7 @@ use std::path::PathBuf;
 use tokio::fs;
 use tokio::sync::RwLock;
 
+use super::encrypted_storage::{EncryptedStorage, EncryptedStorageConfig};
 use super::traits::EvidenceLedger;
 use crate::error::{P2Error, P2Result};
 use crate::types::EvidenceBundle;
@@ -26,7 +28,7 @@ struct EvidenceIndexEntry {
     has_map_commit: bool,
 }
 
-/// File-based evidence ledger implementation
+/// File-based evidence ledger implementation with encryption at rest
 pub struct FileEvidenceLedger {
     /// Base path for evidence storage
     base_path: PathBuf,
@@ -36,14 +38,24 @@ pub struct FileEvidenceLedger {
     index_path: PathBuf,
     /// In-memory index cache
     index_cache: RwLock<HashMap<String, EvidenceIndexEntry>>,
+    /// Encrypted storage handler
+    storage: EncryptedStorage,
 }
 
 impl FileEvidenceLedger {
-    /// Create a new file-based evidence ledger
+    /// Create a new file-based evidence ledger with default encryption
     pub async fn new(base_path: impl Into<PathBuf>) -> P2Result<Self> {
+        Self::with_config(base_path, EncryptedStorageConfig::default()).await
+    }
+
+    /// Create with custom encryption config
+    pub async fn with_config(
+        base_path: impl Into<PathBuf>,
+        encryption_config: EncryptedStorageConfig,
+    ) -> P2Result<Self> {
         let base_path = base_path.into();
         let bundles_path = base_path.join("bundles");
-        let index_path = base_path.join("evidence_index.json");
+        let index_path = base_path.join("evidence_index.enc");
 
         // Create directories
         for path in [&base_path, &bundles_path] {
@@ -52,12 +64,14 @@ impl FileEvidenceLedger {
             })?;
         }
 
+        let storage = EncryptedStorage::new(encryption_config);
+
         // Load or create index
         let index_cache = if index_path.exists() {
-            let data = fs::read_to_string(&index_path).await.map_err(|e| {
-                P2Error::Storage(format!("Failed to read evidence index: {}", e))
-            })?;
-            let entries: Vec<EvidenceIndexEntry> = serde_json::from_str(&data).unwrap_or_default();
+            let entries: Vec<EvidenceIndexEntry> = storage
+                .read(&index_path, "evidence-ledger-index")
+                .await
+                .unwrap_or_default();
             let mut map = HashMap::new();
             for entry in entries {
                 map.insert(entry.bundle_id.clone(), entry);
@@ -72,10 +86,17 @@ impl FileEvidenceLedger {
             bundles_path,
             index_path,
             index_cache,
+            storage,
         })
     }
 
-    /// Save the index to disk
+    /// Create with encryption disabled (for testing only)
+    #[cfg(test)]
+    pub async fn unencrypted(base_path: impl Into<PathBuf>) -> P2Result<Self> {
+        Self::with_config(base_path, EncryptedStorageConfig::unencrypted()).await
+    }
+
+    /// Save the index to disk (encrypted)
     async fn save_index(&self) -> P2Result<()> {
         let entries: Vec<_> = self
             .index_cache
@@ -85,32 +106,22 @@ impl FileEvidenceLedger {
             .cloned()
             .collect();
 
-        let json = serde_json::to_string_pretty(&entries)
-            .map_err(|e| P2Error::Storage(format!("Serialization error: {}", e)))?;
-
-        fs::write(&self.index_path, json).await.map_err(|e| {
-            P2Error::Storage(format!("Failed to write evidence index: {}", e))
-        })?;
-
-        Ok(())
+        self.storage
+            .write(&self.index_path, &entries, "evidence-ledger-index")
+            .await
     }
 
     /// Get the file path for a bundle
     fn bundle_file_path(&self, bundle_id: &str) -> PathBuf {
-        self.bundles_path.join(format!("{}.json", bundle_id))
+        self.bundles_path.join(format!("{}.enc", bundle_id))
     }
 
-    /// Update bundle on disk
+    /// Update bundle on disk (encrypted)
     async fn write_bundle(&self, bundle: &EvidenceBundle) -> P2Result<()> {
-        let json = serde_json::to_string_pretty(&bundle)
-            .map_err(|e| P2Error::Storage(format!("Serialization error: {}", e)))?;
-
         let path = self.bundle_file_path(&bundle.bundle_id);
-        fs::write(&path, json).await.map_err(|e| {
-            P2Error::Storage(format!("Failed to write evidence bundle: {}", e))
-        })?;
-
-        Ok(())
+        self.storage
+            .write(&path, bundle, &bundle.bundle_id)
+            .await
     }
 }
 
@@ -149,13 +160,7 @@ impl EvidenceLedger for FileEvidenceLedger {
             return Ok(None);
         }
 
-        let json = fs::read_to_string(&path).await.map_err(|e| {
-            P2Error::Storage(format!("Failed to read evidence bundle: {}", e))
-        })?;
-
-        let bundle: EvidenceBundle = serde_json::from_str(&json)
-            .map_err(|e| P2Error::Storage(format!("Failed to parse evidence bundle: {}", e)))?;
-
+        let bundle: EvidenceBundle = self.storage.read(&path, bundle_id).await?;
         Ok(Some(bundle))
     }
 
@@ -298,23 +303,19 @@ mod tests {
             format!("bundle:{}", uuid::Uuid::new_v4()),
             "case:test".to_string(),
             ActorId::new("actor:submitter"),
-            vec![SealedPayloadRef {
-                ref_id: "payload:001".to_string(),
-                checksum: Digest::blake3(b"test"),
-                size_bytes: 1024,
-                encryption_algo: "chacha20-poly1305".to_string(),
-                nonce_prefix: "nonce".to_string(),
-                created_at: Utc::now(),
-                storage_tier: crate::types::StorageTemperature::Hot,
-                backend_hints: vec![],
-            }],
+            vec![SealedPayloadRef::new(
+                "payload:001".to_string(),
+                Digest::blake3(b"test"),
+                Digest::blake3(b"encryption_meta"),
+                1024,
+            )],
         )
     }
 
     #[tokio::test]
     async fn test_create_and_get_bundle() {
         let temp_dir = TempDir::new().unwrap();
-        let ledger = FileEvidenceLedger::new(temp_dir.path()).await.unwrap();
+        let ledger = FileEvidenceLedger::unencrypted(temp_dir.path()).await.unwrap();
 
         let bundle = create_test_bundle();
         let bundle_id = bundle.bundle_id.clone();
@@ -329,7 +330,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_bundles_for_case() {
         let temp_dir = TempDir::new().unwrap();
-        let ledger = FileEvidenceLedger::new(temp_dir.path()).await.unwrap();
+        let ledger = FileEvidenceLedger::unencrypted(temp_dir.path()).await.unwrap();
 
         // Create multiple bundles for same case
         for _ in 0..3 {
@@ -344,7 +345,7 @@ mod tests {
     #[tokio::test]
     async fn test_set_bundle_receipt() {
         let temp_dir = TempDir::new().unwrap();
-        let ledger = FileEvidenceLedger::new(temp_dir.path()).await.unwrap();
+        let ledger = FileEvidenceLedger::unencrypted(temp_dir.path()).await.unwrap();
 
         let bundle = create_test_bundle();
         let bundle_id = bundle.bundle_id.clone();
@@ -368,7 +369,7 @@ mod tests {
     #[tokio::test]
     async fn test_verify_bundle() {
         let temp_dir = TempDir::new().unwrap();
-        let ledger = FileEvidenceLedger::new(temp_dir.path()).await.unwrap();
+        let ledger = FileEvidenceLedger::unencrypted(temp_dir.path()).await.unwrap();
 
         let bundle = create_test_bundle();
         let bundle_id = bundle.bundle_id.clone();

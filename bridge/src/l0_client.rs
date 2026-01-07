@@ -331,10 +331,21 @@ impl L0CommitClient for HttpL0Client {
             .map_err(|e| BridgeError::L0Unavailable(format!("HTTP request failed: {}", e)))?;
 
         if !response.status().is_success() {
+            // Non-success status for batch receipts - return empty vec
+            // This is expected for batches that don't exist yet
             return Ok(vec![]);
         }
 
-        let receipts: Vec<L0Receipt> = response.json().await.unwrap_or_default();
+        let receipts: Vec<L0Receipt> = response
+            .json()
+            .await
+            .map_err(|e| {
+                BridgeError::L0Unavailable(format!(
+                    "Failed to parse batch receipts response: {}. \
+                    This may indicate an L0 API version mismatch.",
+                    e
+                ))
+            })?;
 
         Ok(receipts)
     }

@@ -225,18 +225,28 @@ pub struct HealthResponse {
 /// Storage stats response
 #[derive(Debug, Serialize)]
 pub struct StorageStatsResponse {
-    /// Total payloads
-    pub total_payloads: u64,
-    /// Total size in bytes
-    pub total_size_bytes: u64,
-    /// Hot tier count
-    pub hot_count: u64,
-    /// Warm tier count
-    pub warm_count: u64,
-    /// Cold tier count
-    pub cold_count: u64,
+    /// Total payloads (None if not available without full scan)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_payloads: Option<u64>,
+    /// Total size in bytes used
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_size_bytes: Option<u64>,
+    /// Available storage bytes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available_bytes: Option<u64>,
+    /// Hot tier count (None if not available)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hot_count: Option<u64>,
+    /// Warm tier count (None if not available)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warm_count: Option<u64>,
+    /// Cold tier count (None if not available)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cold_count: Option<u64>,
     /// Backend type
     pub backend_type: String,
+    /// Backend health status
+    pub backend_healthy: bool,
 }
 
 /// Migrate temperature request

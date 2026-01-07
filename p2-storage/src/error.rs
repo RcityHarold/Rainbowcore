@@ -40,6 +40,14 @@ pub enum StorageError {
     /// Operation failed
     #[error("Operation failed: {0}")]
     OperationFailed(String),
+
+    /// Replication failed
+    #[error("Replication failed: {0}")]
+    ReplicationFailed(String),
+
+    /// Consistency error
+    #[error("Consistency error: {0}")]
+    ConsistencyError(String),
 }
 
 /// Storage result type

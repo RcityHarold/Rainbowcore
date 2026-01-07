@@ -9,8 +9,8 @@ use l0_core::types::{ActorId, Digest, ReceiptId};
 use crate::error::P2Result;
 use crate::types::{
     AccessTicket, DecryptAuditLog, EvidenceBundle, ExportAuditLog, FullResurrectionSnapshot,
-    PayloadSelector, SamplingArtifact, SealedPayloadRef, SkeletonSnapshot, TicketPermission,
-    TicketRequest,
+    PayloadSelector, SamplingArtifact, SealedPayloadRef, SkeletonSnapshot, TicketAuditLog,
+    TicketPermission, TicketRequest,
 };
 
 /// Snapshot Ledger - manages R0/R1 resurrection snapshots
@@ -176,6 +176,27 @@ pub trait AuditLedger: Send + Sync {
         payload_ref: &str,
         at: DateTime<Utc>,
     ) -> P2Result<bool>;
+
+    /// Record a ticket audit log (MUST for every ticket operation)
+    async fn record_ticket(&self, log: TicketAuditLog) -> P2Result<String>;
+
+    /// Get ticket audit logs by ticket ID
+    async fn get_ticket_logs(&self, ticket_id: &str, limit: usize) -> P2Result<Vec<TicketAuditLog>>;
+
+    /// Get ticket audit logs by actor (issuer/user/revoker)
+    async fn get_ticket_logs_by_actor(
+        &self,
+        actor_id: &ActorId,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> P2Result<Vec<TicketAuditLog>>;
+
+    /// Get ticket audit logs for a resource
+    async fn get_ticket_logs_for_resource(
+        &self,
+        resource_ref: &str,
+        limit: usize,
+    ) -> P2Result<Vec<TicketAuditLog>>;
 }
 
 /// Payload Store - manages sealed payload storage

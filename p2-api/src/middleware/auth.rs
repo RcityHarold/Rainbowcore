@@ -31,24 +31,113 @@ pub struct JwtConfig {
     pub validate_exp: bool,
 }
 
-impl Default for JwtConfig {
-    fn default() -> Self {
-        Self {
-            secret: "default-secret-change-in-production".to_string(),
+/// Error type for JWT configuration
+#[derive(Debug, Clone)]
+pub struct JwtConfigError {
+    pub message: String,
+}
+
+impl std::fmt::Display for JwtConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "JWT config error: {}", self.message)
+    }
+}
+
+impl std::error::Error for JwtConfigError {}
+
+impl JwtConfig {
+    /// Minimum secret length for security
+    const MIN_SECRET_LENGTH: usize = 32;
+
+    /// Create a new JWT config with secret (fallible)
+    ///
+    /// # Arguments
+    /// * `secret` - The secret key. Must be at least 32 bytes for security.
+    ///
+    /// # Returns
+    /// Error if the secret is too short (less than 32 bytes).
+    pub fn try_new(secret: impl Into<String>) -> Result<Self, JwtConfigError> {
+        let secret = secret.into();
+        if secret.len() < Self::MIN_SECRET_LENGTH {
+            return Err(JwtConfigError {
+                message: format!(
+                    "JWT secret must be at least {} bytes for security. Got {} bytes. \
+                    Use a cryptographically secure random secret.",
+                    Self::MIN_SECRET_LENGTH,
+                    secret.len()
+                ),
+            });
+        }
+        Ok(Self {
+            secret,
             algorithm: Algorithm::HS256,
             issuer: None,
             audience: None,
             validate_exp: true,
-        }
+        })
     }
-}
 
-impl JwtConfig {
     /// Create a new JWT config with secret
+    ///
+    /// # Arguments
+    /// * `secret` - The secret key. Must be at least 32 bytes for security.
+    ///
+    /// # Panics
+    /// Panics if the secret is too short (less than 32 bytes).
+    /// Use `try_new()` for fallible initialization.
+    pub fn new(secret: impl Into<String>) -> Self {
+        Self::try_new(secret).expect("Invalid JWT configuration")
+    }
+
+    /// Create a new JWT config from environment variable (fallible)
+    ///
+    /// # Arguments
+    /// * `env_var` - Name of the environment variable containing the secret
+    ///
+    /// # Returns
+    /// Error if the environment variable is not set or the secret is too short.
+    pub fn try_from_env(env_var: &str) -> Result<Self, JwtConfigError> {
+        let secret = std::env::var(env_var).map_err(|_| JwtConfigError {
+            message: format!(
+                "JWT secret environment variable '{}' is not set. \
+                Set it to a cryptographically secure random value (at least 32 bytes).",
+                env_var
+            ),
+        })?;
+        Self::try_new(secret)
+    }
+
+    /// Create a new JWT config from environment variable
+    ///
+    /// # Arguments
+    /// * `env_var` - Name of the environment variable containing the secret
+    ///
+    /// # Panics
+    /// Panics if the environment variable is not set or the secret is too short.
+    /// Use `try_from_env()` for fallible initialization.
+    pub fn from_env(env_var: &str) -> Self {
+        Self::try_from_env(env_var).expect("Invalid JWT configuration")
+    }
+
+    /// Create JWT config with secret (alias for new)
     pub fn with_secret(secret: impl Into<String>) -> Self {
+        Self::new(secret)
+    }
+
+    /// Create a test config with a weak secret (FOR TESTING ONLY)
+    ///
+    /// # Security Warning
+    /// This method creates a config with a short secret that is NOT SECURE.
+    /// Only use in test code.
+    #[cfg(test)]
+    pub fn for_testing(secret: impl Into<String>) -> Self {
+        let secret = secret.into();
         Self {
-            secret: secret.into(),
-            ..Default::default()
+            secret,
+            algorithm: Algorithm::HS256,
+            issuer: None,
+            audience: None,
+            validate_exp: true,
         }
     }
 
@@ -62,6 +151,17 @@ impl JwtConfig {
     pub fn with_audience(mut self, audience: impl Into<String>) -> Self {
         self.audience = Some(audience.into());
         self
+    }
+
+    /// Validate the configuration
+    pub fn validate(&self) -> Result<(), String> {
+        if self.secret.len() < Self::MIN_SECRET_LENGTH {
+            return Err(format!(
+                "JWT secret must be at least {} bytes for security",
+                Self::MIN_SECRET_LENGTH
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -277,8 +377,8 @@ mod tests {
 
     #[test]
     fn test_validate_token() {
-        let secret = "test-secret";
-        let config = JwtConfig::with_secret(secret);
+        let secret = "test-secret-for-unit-testing-only";
+        let config = JwtConfig::for_testing(secret);
 
         let claims = AuthClaims {
             sub: "user:123".to_string(),
@@ -300,8 +400,8 @@ mod tests {
 
     #[test]
     fn test_expired_token() {
-        let secret = "test-secret";
-        let config = JwtConfig::with_secret(secret);
+        let secret = "test-secret-for-unit-testing-only";
+        let config = JwtConfig::for_testing(secret);
 
         let claims = AuthClaims {
             sub: "user:123".to_string(),

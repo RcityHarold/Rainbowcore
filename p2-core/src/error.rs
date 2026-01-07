@@ -82,6 +82,14 @@ pub enum P2Error {
     /// Backend unavailable
     #[error("Storage backend unavailable: {0}")]
     BackendUnavailable(String),
+
+    /// Configuration error
+    #[error("Configuration error: {0}")]
+    Configuration(String),
+
+    /// Key management error
+    #[error("Key management error: {0}")]
+    KeyManagement(String),
 }
 
 /// P2 Result type

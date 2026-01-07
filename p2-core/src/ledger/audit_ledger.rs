@@ -2,6 +2,7 @@
 //!
 //! Persistent storage for audit logs - decrypt, export, and sampling artifacts.
 //! All payload access MUST generate an audit log entry.
+//! All data is encrypted at rest using the encrypted_storage module.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -12,9 +13,10 @@ use std::path::PathBuf;
 use tokio::fs;
 use tokio::sync::RwLock;
 
+use super::encrypted_storage::{EncryptedStorage, EncryptedStorageConfig};
 use super::traits::AuditLedger;
 use crate::error::{P2Error, P2Result};
-use crate::types::{DecryptAuditLog, ExportAuditLog, SamplingArtifact};
+use crate::types::{DecryptAuditLog, ExportAuditLog, SamplingArtifact, TicketAuditLog};
 
 /// Index entry types
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -22,6 +24,7 @@ enum AuditLogType {
     Decrypt,
     Export,
     Sampling,
+    Ticket,
 }
 
 /// Audit log index entry
@@ -34,9 +37,13 @@ struct AuditIndexEntry {
     batch_id: Option<String>,
     timestamp: DateTime<Utc>,
     is_failed: bool,
+    /// For ticket logs: the ticket ID
+    ticket_id: Option<String>,
+    /// For ticket logs: the resource reference
+    resource_ref: Option<String>,
 }
 
-/// File-based audit ledger implementation
+/// File-based audit ledger implementation with encryption at rest
 pub struct FileAuditLedger {
     /// Base path for audit storage
     base_path: PathBuf,
@@ -46,34 +53,49 @@ pub struct FileAuditLedger {
     export_path: PathBuf,
     /// Sampling artifacts directory
     sampling_path: PathBuf,
+    /// Ticket logs directory
+    ticket_path: PathBuf,
     /// Index path
     index_path: PathBuf,
     /// In-memory index cache
     index_cache: RwLock<HashMap<String, AuditIndexEntry>>,
+    /// Encrypted storage handler
+    storage: EncryptedStorage,
 }
 
 impl FileAuditLedger {
-    /// Create a new file-based audit ledger
+    /// Create a new file-based audit ledger with default encryption
     pub async fn new(base_path: impl Into<PathBuf>) -> P2Result<Self> {
+        Self::with_config(base_path, EncryptedStorageConfig::default()).await
+    }
+
+    /// Create with custom encryption config
+    pub async fn with_config(
+        base_path: impl Into<PathBuf>,
+        encryption_config: EncryptedStorageConfig,
+    ) -> P2Result<Self> {
         let base_path = base_path.into();
         let decrypt_path = base_path.join("decrypt");
         let export_path = base_path.join("export");
         let sampling_path = base_path.join("sampling");
-        let index_path = base_path.join("audit_index.json");
+        let ticket_path = base_path.join("ticket");
+        let index_path = base_path.join("audit_index.enc");
 
         // Create directories
-        for path in [&base_path, &decrypt_path, &export_path, &sampling_path] {
+        for path in [&base_path, &decrypt_path, &export_path, &sampling_path, &ticket_path] {
             fs::create_dir_all(path).await.map_err(|e| {
                 P2Error::Storage(format!("Failed to create directory {:?}: {}", path, e))
             })?;
         }
 
+        let storage = EncryptedStorage::new(encryption_config);
+
         // Load or create index
         let index_cache = if index_path.exists() {
-            let data = fs::read_to_string(&index_path).await.map_err(|e| {
-                P2Error::Storage(format!("Failed to read audit index: {}", e))
-            })?;
-            let entries: Vec<AuditIndexEntry> = serde_json::from_str(&data).unwrap_or_default();
+            let entries: Vec<AuditIndexEntry> = storage
+                .read(&index_path, "audit-ledger-index")
+                .await
+                .unwrap_or_default();
             let mut map = HashMap::new();
             for entry in entries {
                 map.insert(entry.log_id.clone(), entry);
@@ -88,12 +110,20 @@ impl FileAuditLedger {
             decrypt_path,
             export_path,
             sampling_path,
+            ticket_path,
             index_path,
             index_cache,
+            storage,
         })
     }
 
-    /// Save the index to disk
+    /// Create with encryption disabled (for testing only)
+    #[cfg(test)]
+    pub async fn unencrypted(base_path: impl Into<PathBuf>) -> P2Result<Self> {
+        Self::with_config(base_path, EncryptedStorageConfig::unencrypted()).await
+    }
+
+    /// Save the index to disk (encrypted)
     async fn save_index(&self) -> P2Result<()> {
         let entries: Vec<_> = self
             .index_cache
@@ -103,80 +133,73 @@ impl FileAuditLedger {
             .cloned()
             .collect();
 
-        let json = serde_json::to_string_pretty(&entries)
-            .map_err(|e| P2Error::Storage(format!("Serialization error: {}", e)))?;
-
-        fs::write(&self.index_path, json).await.map_err(|e| {
-            P2Error::Storage(format!("Failed to write audit index: {}", e))
-        })?;
-
-        Ok(())
+        self.storage
+            .write(&self.index_path, &entries, "audit-ledger-index")
+            .await
     }
 
     /// Get file path for decrypt log
     fn decrypt_file_path(&self, log_id: &str) -> PathBuf {
-        self.decrypt_path.join(format!("{}.json", log_id))
+        self.decrypt_path.join(format!("{}.enc", log_id))
     }
 
     /// Get file path for export log
     fn export_file_path(&self, log_id: &str) -> PathBuf {
-        self.export_path.join(format!("{}.json", log_id))
+        self.export_path.join(format!("{}.enc", log_id))
     }
 
     /// Get file path for sampling artifact
     fn sampling_file_path(&self, artifact_id: &str) -> PathBuf {
-        self.sampling_path.join(format!("{}.json", artifact_id))
+        self.sampling_path.join(format!("{}.enc", artifact_id))
     }
 
-    /// Read decrypt log from disk
+    /// Get file path for ticket log
+    fn ticket_file_path(&self, log_id: &str) -> PathBuf {
+        self.ticket_path.join(format!("{}.enc", log_id))
+    }
+
+    /// Read decrypt log from disk (encrypted)
     async fn read_decrypt_log(&self, log_id: &str) -> P2Result<Option<DecryptAuditLog>> {
         let path = self.decrypt_file_path(log_id);
         if !path.exists() {
             return Ok(None);
         }
 
-        let json = fs::read_to_string(&path).await.map_err(|e| {
-            P2Error::Storage(format!("Failed to read decrypt log: {}", e))
-        })?;
-
-        let log: DecryptAuditLog = serde_json::from_str(&json)
-            .map_err(|e| P2Error::Storage(format!("Failed to parse decrypt log: {}", e)))?;
-
+        let log: DecryptAuditLog = self.storage.read(&path, log_id).await?;
         Ok(Some(log))
     }
 
-    /// Read export log from disk
+    /// Read export log from disk (encrypted)
     async fn read_export_log(&self, log_id: &str) -> P2Result<Option<ExportAuditLog>> {
         let path = self.export_file_path(log_id);
         if !path.exists() {
             return Ok(None);
         }
 
-        let json = fs::read_to_string(&path).await.map_err(|e| {
-            P2Error::Storage(format!("Failed to read export log: {}", e))
-        })?;
-
-        let log: ExportAuditLog = serde_json::from_str(&json)
-            .map_err(|e| P2Error::Storage(format!("Failed to parse export log: {}", e)))?;
-
+        let log: ExportAuditLog = self.storage.read(&path, log_id).await?;
         Ok(Some(log))
     }
 
-    /// Read sampling artifact from disk
+    /// Read sampling artifact from disk (encrypted)
     async fn read_sampling_artifact(&self, artifact_id: &str) -> P2Result<Option<SamplingArtifact>> {
         let path = self.sampling_file_path(artifact_id);
         if !path.exists() {
             return Ok(None);
         }
 
-        let json = fs::read_to_string(&path).await.map_err(|e| {
-            P2Error::Storage(format!("Failed to read sampling artifact: {}", e))
-        })?;
-
-        let artifact: SamplingArtifact = serde_json::from_str(&json)
-            .map_err(|e| P2Error::Storage(format!("Failed to parse sampling artifact: {}", e)))?;
-
+        let artifact: SamplingArtifact = self.storage.read(&path, artifact_id).await?;
         Ok(Some(artifact))
+    }
+
+    /// Read ticket log from disk (encrypted)
+    async fn read_ticket_log(&self, log_id: &str) -> P2Result<Option<TicketAuditLog>> {
+        let path = self.ticket_file_path(log_id);
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let log: TicketAuditLog = self.storage.read(&path, log_id).await?;
+        Ok(Some(log))
     }
 }
 
@@ -185,14 +208,9 @@ impl AuditLedger for FileAuditLedger {
     async fn record_decrypt(&self, log: DecryptAuditLog) -> P2Result<String> {
         let log_id = log.log_id.clone();
 
-        // Serialize and write
-        let json = serde_json::to_string_pretty(&log)
-            .map_err(|e| P2Error::Storage(format!("Serialization error: {}", e)))?;
-
+        // Write encrypted log
         let path = self.decrypt_file_path(&log_id);
-        fs::write(&path, json).await.map_err(|e| {
-            P2Error::Storage(format!("Failed to write decrypt log: {}", e))
-        })?;
+        self.storage.write(&path, &log, &log_id).await?;
 
         // Update index
         {
@@ -207,6 +225,8 @@ impl AuditLedger for FileAuditLedger {
                     batch_id: None,
                     timestamp: log.decrypted_at,
                     is_failed: !matches!(log.outcome, crate::types::DecryptOutcome::Success),
+                    ticket_id: None,
+                    resource_ref: None,
                 },
             );
         }
@@ -219,14 +239,9 @@ impl AuditLedger for FileAuditLedger {
     async fn record_export(&self, log: ExportAuditLog) -> P2Result<String> {
         let log_id = log.log_id.clone();
 
-        // Serialize and write
-        let json = serde_json::to_string_pretty(&log)
-            .map_err(|e| P2Error::Storage(format!("Serialization error: {}", e)))?;
-
+        // Write encrypted log
         let path = self.export_file_path(&log_id);
-        fs::write(&path, json).await.map_err(|e| {
-            P2Error::Storage(format!("Failed to write export log: {}", e))
-        })?;
+        self.storage.write(&path, &log, &log_id).await?;
 
         // Update index
         {
@@ -241,6 +256,8 @@ impl AuditLedger for FileAuditLedger {
                     batch_id: None,
                     timestamp: log.exported_at,
                     is_failed: false,
+                    ticket_id: None,
+                    resource_ref: None,
                 },
             );
         }
@@ -253,14 +270,9 @@ impl AuditLedger for FileAuditLedger {
     async fn record_sampling(&self, artifact: SamplingArtifact) -> P2Result<String> {
         let artifact_id = artifact.artifact_id.clone();
 
-        // Serialize and write
-        let json = serde_json::to_string_pretty(&artifact)
-            .map_err(|e| P2Error::Storage(format!("Serialization error: {}", e)))?;
-
+        // Write encrypted artifact
         let path = self.sampling_file_path(&artifact_id);
-        fs::write(&path, json).await.map_err(|e| {
-            P2Error::Storage(format!("Failed to write sampling artifact: {}", e))
-        })?;
+        self.storage.write(&path, &artifact, &artifact_id).await?;
 
         // Update index
         {
@@ -275,6 +287,8 @@ impl AuditLedger for FileAuditLedger {
                     batch_id: Some(artifact.sampling_batch.clone()),
                     timestamp: artifact.sampled_at,
                     is_failed: artifact.needs_escalation(),
+                    ticket_id: None,
+                    resource_ref: None,
                 },
             );
         }
@@ -466,6 +480,133 @@ impl AuditLedger for FileAuditLedger {
 
         Ok(false)
     }
+
+    async fn record_ticket(&self, log: TicketAuditLog) -> P2Result<String> {
+        let log_id = log.log_id.clone();
+
+        // Write encrypted log
+        let path = self.ticket_file_path(&log_id);
+        self.storage.write(&path, &log, &log_id).await?;
+
+        // Update index
+        {
+            let mut cache = self.index_cache.write().await;
+            cache.insert(
+                log_id.clone(),
+                AuditIndexEntry {
+                    log_id: log_id.clone(),
+                    log_type: AuditLogType::Ticket,
+                    actor_id: Some(log.actor.0.clone()),
+                    payload_ref: None,
+                    batch_id: None,
+                    timestamp: log.timestamp,
+                    is_failed: !log.is_success(),
+                    ticket_id: Some(log.ticket_id.clone()),
+                    resource_ref: log.target_resource_ref.clone(),
+                },
+            );
+        }
+
+        self.save_index().await?;
+
+        Ok(log_id)
+    }
+
+    async fn get_ticket_logs(&self, ticket_id: &str, limit: usize) -> P2Result<Vec<TicketAuditLog>> {
+        let entries = {
+            let cache = self.index_cache.read().await;
+
+            let mut entries: Vec<_> = cache
+                .values()
+                .filter(|e| {
+                    matches!(e.log_type, AuditLogType::Ticket)
+                        && e.ticket_id.as_deref() == Some(ticket_id)
+                })
+                .cloned()
+                .collect();
+
+            // Sort by timestamp descending
+            entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+            entries.truncate(limit);
+            entries
+        };
+
+        let mut logs = Vec::new();
+        for entry in entries {
+            if let Some(log) = self.read_ticket_log(&entry.log_id).await? {
+                logs.push(log);
+            }
+        }
+
+        Ok(logs)
+    }
+
+    async fn get_ticket_logs_by_actor(
+        &self,
+        actor_id: &ActorId,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> P2Result<Vec<TicketAuditLog>> {
+        let entries = {
+            let cache = self.index_cache.read().await;
+
+            cache
+                .values()
+                .filter(|e| {
+                    matches!(e.log_type, AuditLogType::Ticket)
+                        && e.actor_id.as_deref() == Some(&actor_id.0)
+                        && e.timestamp >= from
+                        && e.timestamp <= to
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+
+        let mut logs = Vec::new();
+        for entry in entries {
+            if let Some(log) = self.read_ticket_log(&entry.log_id).await? {
+                logs.push(log);
+            }
+        }
+
+        // Sort by timestamp
+        logs.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+        Ok(logs)
+    }
+
+    async fn get_ticket_logs_for_resource(
+        &self,
+        resource_ref: &str,
+        limit: usize,
+    ) -> P2Result<Vec<TicketAuditLog>> {
+        let entries = {
+            let cache = self.index_cache.read().await;
+
+            let mut entries: Vec<_> = cache
+                .values()
+                .filter(|e| {
+                    matches!(e.log_type, AuditLogType::Ticket)
+                        && e.resource_ref.as_deref() == Some(resource_ref)
+                })
+                .cloned()
+                .collect();
+
+            // Sort by timestamp descending
+            entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+            entries.truncate(limit);
+            entries
+        };
+
+        let mut logs = Vec::new();
+        for entry in entries {
+            if let Some(log) = self.read_ticket_log(&entry.log_id).await? {
+                logs.push(log);
+            }
+        }
+
+        Ok(logs)
+    }
 }
 
 #[cfg(test)]
@@ -521,7 +662,7 @@ mod tests {
     #[tokio::test]
     async fn test_record_and_get_decrypt_log() {
         let temp_dir = TempDir::new().unwrap();
-        let ledger = FileAuditLedger::new(temp_dir.path()).await.unwrap();
+        let ledger = FileAuditLedger::unencrypted(temp_dir.path()).await.unwrap();
 
         let log = create_test_decrypt_log();
         let log_id = log.log_id.clone();
@@ -537,7 +678,7 @@ mod tests {
     #[tokio::test]
     async fn test_record_and_get_export_log() {
         let temp_dir = TempDir::new().unwrap();
-        let ledger = FileAuditLedger::new(temp_dir.path()).await.unwrap();
+        let ledger = FileAuditLedger::unencrypted(temp_dir.path()).await.unwrap();
 
         let log = create_test_export_log();
 
@@ -550,7 +691,7 @@ mod tests {
     #[tokio::test]
     async fn test_record_and_get_sampling() {
         let temp_dir = TempDir::new().unwrap();
-        let ledger = FileAuditLedger::new(temp_dir.path()).await.unwrap();
+        let ledger = FileAuditLedger::unencrypted(temp_dir.path()).await.unwrap();
 
         // Record successful and failed samplings
         let artifact1 = create_test_sampling_artifact("batch:001", false);
@@ -572,7 +713,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_decrypt_logs_by_actor() {
         let temp_dir = TempDir::new().unwrap();
-        let ledger = FileAuditLedger::new(temp_dir.path()).await.unwrap();
+        let ledger = FileAuditLedger::unencrypted(temp_dir.path()).await.unwrap();
 
         let log = create_test_decrypt_log();
         let actor_id = log.decryptor.clone();
@@ -589,7 +730,7 @@ mod tests {
     #[tokio::test]
     async fn test_verify_decrypt_audited() {
         let temp_dir = TempDir::new().unwrap();
-        let ledger = FileAuditLedger::new(temp_dir.path()).await.unwrap();
+        let ledger = FileAuditLedger::unencrypted(temp_dir.path()).await.unwrap();
 
         let log = create_test_decrypt_log();
         let ticket_ref = log.ticket_ref.clone();
@@ -603,5 +744,158 @@ mod tests {
 
         // Should not find with wrong ticket
         assert!(!ledger.verify_decrypt_audited("wrong:ticket", &payload_ref, at).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_record_and_get_ticket_log() {
+        use crate::types::TicketAuditLog;
+
+        let temp_dir = TempDir::new().unwrap();
+        let ledger = FileAuditLedger::unencrypted(temp_dir.path()).await.unwrap();
+
+        let log = TicketAuditLog::issue(
+            format!("ticketlog:{}", uuid::Uuid::new_v4()),
+            "ticket:001".to_string(),
+            ActorId::new("actor:issuer"),
+            ActorId::new("actor:holder"),
+            "payload:001".to_string(),
+            vec!["read".to_string(), "export".to_string()],
+            3600,
+            Some("consent:001".to_string()),
+        );
+        let log_id = log.log_id.clone();
+        let ticket_id = log.ticket_id.clone();
+
+        ledger.record_ticket(log).await.unwrap();
+
+        let logs = ledger.get_ticket_logs(&ticket_id, 10).await.unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].log_id, log_id);
+    }
+
+    #[tokio::test]
+    async fn test_ticket_use_log() {
+        use crate::types::TicketAuditLog;
+
+        let temp_dir = TempDir::new().unwrap();
+        let ledger = FileAuditLedger::unencrypted(temp_dir.path()).await.unwrap();
+
+        // Issue log
+        let issue_log = TicketAuditLog::issue(
+            format!("ticketlog:{}", uuid::Uuid::new_v4()),
+            "ticket:002".to_string(),
+            ActorId::new("actor:issuer"),
+            ActorId::new("actor:holder"),
+            "payload:002".to_string(),
+            vec!["read".to_string()],
+            3600,
+            None,
+        );
+        ledger.record_ticket(issue_log).await.unwrap();
+
+        // Use log
+        let use_log = TicketAuditLog::use_ticket(
+            format!("ticketlog:{}", uuid::Uuid::new_v4()),
+            "ticket:002".to_string(),
+            ActorId::new("actor:holder"),
+            "payload:002".to_string(),
+            1,
+            Some(4),
+        );
+        ledger.record_ticket(use_log).await.unwrap();
+
+        // Get all logs for the ticket
+        let logs = ledger.get_ticket_logs("ticket:002", 10).await.unwrap();
+        assert_eq!(logs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_ticket_logs_by_actor() {
+        use crate::types::TicketAuditLog;
+
+        let temp_dir = TempDir::new().unwrap();
+        let ledger = FileAuditLedger::unencrypted(temp_dir.path()).await.unwrap();
+
+        let issuer = ActorId::new("actor:issuer");
+
+        // Create a few ticket logs
+        for i in 0..3 {
+            let log = TicketAuditLog::issue(
+                format!("ticketlog:{}", uuid::Uuid::new_v4()),
+                format!("ticket:{:03}", i),
+                issuer.clone(),
+                ActorId::new("actor:holder"),
+                format!("payload:{:03}", i),
+                vec!["read".to_string()],
+                3600,
+                None,
+            );
+            ledger.record_ticket(log).await.unwrap();
+        }
+
+        let from = Utc::now() - chrono::Duration::hours(1);
+        let to = Utc::now() + chrono::Duration::hours(1);
+
+        let logs = ledger.get_ticket_logs_by_actor(&issuer, from, to).await.unwrap();
+        assert_eq!(logs.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_ticket_logs_for_resource() {
+        use crate::types::TicketAuditLog;
+
+        let temp_dir = TempDir::new().unwrap();
+        let ledger = FileAuditLedger::unencrypted(temp_dir.path()).await.unwrap();
+
+        let resource_ref = "payload:resource-001";
+
+        // Issue and use tickets for the same resource
+        let issue_log = TicketAuditLog::issue(
+            format!("ticketlog:{}", uuid::Uuid::new_v4()),
+            "ticket:res-001".to_string(),
+            ActorId::new("actor:issuer"),
+            ActorId::new("actor:holder"),
+            resource_ref.to_string(),
+            vec!["read".to_string()],
+            3600,
+            None,
+        );
+        ledger.record_ticket(issue_log).await.unwrap();
+
+        let use_log = TicketAuditLog::use_ticket(
+            format!("ticketlog:{}", uuid::Uuid::new_v4()),
+            "ticket:res-001".to_string(),
+            ActorId::new("actor:holder"),
+            resource_ref.to_string(),
+            1,
+            None,
+        );
+        ledger.record_ticket(use_log).await.unwrap();
+
+        let logs = ledger.get_ticket_logs_for_resource(resource_ref, 10).await.unwrap();
+        assert_eq!(logs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_ticket_revoke_log() {
+        use crate::types::TicketAuditLog;
+
+        let temp_dir = TempDir::new().unwrap();
+        let ledger = FileAuditLedger::unencrypted(temp_dir.path()).await.unwrap();
+
+        let revoke_log = TicketAuditLog::revoke(
+            format!("ticketlog:{}", uuid::Uuid::new_v4()),
+            "ticket:revoked".to_string(),
+            ActorId::new("actor:admin"),
+            "Security policy violation".to_string(),
+        );
+        let log_id = revoke_log.log_id.clone();
+
+        ledger.record_ticket(revoke_log).await.unwrap();
+
+        let logs = ledger.get_ticket_logs("ticket:revoked", 10).await.unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].log_id, log_id);
+        assert_eq!(logs[0].reason, Some("Security policy violation".to_string()));
     }
 }

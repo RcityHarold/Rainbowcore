@@ -1,10 +1,20 @@
 //! Application State
 //!
 //! Shared state for the P2 API service.
+//!
+//! # Production Usage
+//!
+//! In production, always use `AppState::new()` with an L0 URL:
+//! ```ignore
+//! let state = AppState::new(storage_path, l0_url).await?;
+//! ```
+//!
+//! For testing, use `AppState::for_testing()`.
 
 use std::sync::Arc;
 
-use p2_core::ledger::{FileAuditLedger, FileEvidenceLedger, FileTicketLedger};
+use bridge::{L0CommitClient, MockL0Client};
+use p2_core::ledger::{FileAuditLedger, FileEvidenceLedger, FileSyncLedger, FileTicketLedger};
 use p2_storage::LocalStorageBackend;
 
 /// Application state
@@ -18,11 +28,56 @@ pub struct AppState {
     pub ticket_ledger: Arc<FileTicketLedger>,
     /// Audit ledger
     pub audit_ledger: Arc<FileAuditLedger>,
+    /// Sync state ledger
+    pub sync_ledger: Arc<FileSyncLedger>,
+    /// L0 commit client
+    pub l0_client: Arc<dyn L0CommitClient>,
 }
 
 impl AppState {
-    /// Create new application state
-    pub async fn new(storage_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    /// Create new application state with L0 URL (RECOMMENDED FOR PRODUCTION)
+    ///
+    /// This connects to a real L0 instance for commitment anchoring.
+    ///
+    /// # Arguments
+    /// * `storage_path` - Path for local storage
+    /// * `l0_url` - URL of the L0 API (e.g., "http://localhost:8080")
+    pub async fn new(
+        storage_path: &str,
+        l0_url: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let l0_client = Arc::new(bridge::HttpL0Client::new(l0_url));
+        Self::with_l0_client(storage_path, l0_client).await
+    }
+
+    /// Create application state for testing with mock L0 client
+    ///
+    /// # Security Warning
+    /// This uses a mock L0 client that doesn't provide real commitment anchoring.
+    /// Only use in tests and development.
+    #[cfg(test)]
+    pub async fn for_testing(storage_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::with_l0_client(storage_path, Arc::new(MockL0Client::new())).await
+    }
+
+    /// Create application state with mock L0 client (DEVELOPMENT ONLY)
+    ///
+    /// # Security Warning
+    /// **DO NOT USE IN PRODUCTION!** This uses a mock L0 client that doesn't
+    /// provide real commitment anchoring. Use `new()` with an L0 URL instead.
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use new(storage_path, l0_url) for production. This uses a mock L0 client."
+    )]
+    pub async fn new_mock(storage_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::with_l0_client(storage_path, Arc::new(MockL0Client::new())).await
+    }
+
+    /// Create new application state with custom L0 client
+    pub async fn with_l0_client(
+        storage_path: &str,
+        l0_client: Arc<dyn L0CommitClient>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let storage = Arc::new(LocalStorageBackend::new(storage_path).await?);
 
         // Initialize ledgers in ledger subdirectory
@@ -36,36 +91,98 @@ impl AppState {
         let audit_ledger = Arc::new(
             FileAuditLedger::new(format!("{}/audit", ledger_path)).await?,
         );
+        let sync_ledger = Arc::new(
+            FileSyncLedger::new(format!("{}/sync", ledger_path)).await?,
+        );
 
         Ok(Self {
             storage,
             evidence_ledger,
             ticket_ledger,
             audit_ledger,
+            sync_ledger,
+            l0_client,
         })
     }
 
-    /// Create with custom storage backend (ledgers will be at default location)
-    pub fn with_storage(storage: Arc<LocalStorageBackend>) -> Self {
-        // For backwards compatibility, use blocking runtime to create ledgers
-        // In production, prefer using new() which is async
+    /// Create with custom storage backend, L0 client, and ledger path
+    ///
+    /// # Arguments
+    /// * `storage` - Storage backend for payload data
+    /// * `l0_client` - L0 commitment client for anchoring
+    /// * `ledger_path` - Base path for ledger storage (must be persistent and secure)
+    ///
+    /// # Panics
+    /// Panics if ledger initialization fails. Use `try_with_storage_and_l0` for
+    /// fallible initialization.
+    pub fn with_storage_and_l0(
+        storage: Arc<LocalStorageBackend>,
+        l0_client: Arc<dyn L0CommitClient>,
+        ledger_path: &str,
+    ) -> Self {
+        Self::try_with_storage_and_l0(storage, l0_client, ledger_path)
+            .expect("Failed to initialize ledgers")
+    }
+
+    /// Create with custom storage backend, L0 client, and ledger path (fallible)
+    ///
+    /// # Arguments
+    /// * `storage` - Storage backend for payload data
+    /// * `l0_client` - L0 commitment client for anchoring
+    /// * `ledger_path` - Base path for ledger storage (must be persistent and secure)
+    ///
+    /// # Returns
+    /// Error if ledger initialization fails
+    pub fn try_with_storage_and_l0(
+        storage: Arc<LocalStorageBackend>,
+        l0_client: Arc<dyn L0CommitClient>,
+        ledger_path: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        // Validate ledger path is not /tmp (unreliable for production)
+        if ledger_path.starts_with("/tmp") {
+            tracing::warn!(
+                path = ledger_path,
+                "Using /tmp for ledger storage is NOT recommended for production. \
+                 Data may be lost on system restart."
+            );
+        }
+
+        // Use blocking runtime to create ledgers
         let rt = tokio::runtime::Handle::current();
         let evidence_ledger = rt
-            .block_on(FileEvidenceLedger::new("/tmp/p2-ledgers/evidence"))
-            .expect("Failed to create evidence ledger");
+            .block_on(FileEvidenceLedger::new(format!("{}/evidence", ledger_path)))?;
         let ticket_ledger = rt
-            .block_on(FileTicketLedger::new("/tmp/p2-ledgers/tickets"))
-            .expect("Failed to create ticket ledger");
+            .block_on(FileTicketLedger::new(format!("{}/tickets", ledger_path)))?;
         let audit_ledger = rt
-            .block_on(FileAuditLedger::new("/tmp/p2-ledgers/audit"))
-            .expect("Failed to create audit ledger");
+            .block_on(FileAuditLedger::new(format!("{}/audit", ledger_path)))?;
+        let sync_ledger = rt
+            .block_on(FileSyncLedger::new(format!("{}/sync", ledger_path)))?;
 
-        Self {
+        Ok(Self {
             storage,
             evidence_ledger: Arc::new(evidence_ledger),
             ticket_ledger: Arc::new(ticket_ledger),
             audit_ledger: Arc::new(audit_ledger),
-        }
+            sync_ledger: Arc::new(sync_ledger),
+            l0_client,
+        })
+    }
+
+    /// Create with custom storage backend (DEPRECATED - uses mock L0 and /tmp)
+    ///
+    /// # Security Warning
+    /// **DO NOT USE IN PRODUCTION!**
+    /// - Uses mock L0 client (no real commitment anchoring)
+    /// - Uses /tmp for ledger storage (data loss risk on restart)
+    ///
+    /// Use `with_storage_and_l0(storage, l0_client, ledger_path)` instead.
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use with_storage_and_l0(storage, l0_client, ledger_path). This uses mock L0 and /tmp storage."
+    )]
+    #[allow(dead_code)]
+    pub fn with_storage(storage: Arc<LocalStorageBackend>) -> Self {
+        Self::with_storage_and_l0(storage, Arc::new(MockL0Client::new()), "/tmp/p2-ledgers")
     }
 
     /// Create with all components
@@ -74,12 +191,16 @@ impl AppState {
         evidence_ledger: Arc<FileEvidenceLedger>,
         ticket_ledger: Arc<FileTicketLedger>,
         audit_ledger: Arc<FileAuditLedger>,
+        sync_ledger: Arc<FileSyncLedger>,
+        l0_client: Arc<dyn L0CommitClient>,
     ) -> Self {
         Self {
             storage,
             evidence_ledger,
             ticket_ledger,
             audit_ledger,
+            sync_ledger,
+            l0_client,
         }
     }
 }

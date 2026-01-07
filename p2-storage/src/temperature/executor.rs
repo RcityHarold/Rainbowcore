@@ -26,6 +26,25 @@ pub struct TemperaturePolicyExecutor<B: P2StorageBackend> {
     access_tracker: RwLock<AccessTracker>,
     /// Executor ID
     executor_id: String,
+    /// Cached storage utilization percentage
+    cached_utilization: RwLock<CachedUtilization>,
+}
+
+/// Cached storage utilization with timestamp
+struct CachedUtilization {
+    /// Utilization percentage (0-100)
+    percent: u8,
+    /// When this was last computed
+    last_computed: DateTime<Utc>,
+}
+
+impl Default for CachedUtilization {
+    fn default() -> Self {
+        Self {
+            percent: 50, // Default fallback
+            last_computed: DateTime::UNIX_EPOCH.into(),
+        }
+    }
 }
 
 impl<B: P2StorageBackend> TemperaturePolicyExecutor<B> {
@@ -42,7 +61,52 @@ impl<B: P2StorageBackend> TemperaturePolicyExecutor<B> {
             in_progress: RwLock::new(HashMap::new()),
             access_tracker: RwLock::new(AccessTracker::new()),
             executor_id: uuid::Uuid::new_v4().to_string(),
+            cached_utilization: RwLock::new(CachedUtilization::default()),
         }
+    }
+
+    /// Get current storage utilization percentage
+    /// Caches the result for 5 minutes to avoid excessive health checks
+    async fn get_storage_utilization(&self) -> u8 {
+        const CACHE_DURATION_SECS: i64 = 300; // 5 minutes
+
+        // Check cache first
+        {
+            let cached = self.cached_utilization.read().await;
+            let age = Utc::now() - cached.last_computed;
+            if age.num_seconds() < CACHE_DURATION_SECS {
+                return cached.percent;
+            }
+        }
+
+        // Compute fresh utilization from health check
+        let utilization = match self.backend.health_check().await {
+            Ok(status) => {
+                match (status.used_bytes, status.available_bytes) {
+                    (Some(used), Some(available)) if used + available > 0 => {
+                        let total = used + available;
+                        ((used as f64 / total as f64) * 100.0) as u8
+                    }
+                    _ => {
+                        debug!("Backend health check missing storage metrics, using default");
+                        50 // Default fallback
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Failed to get storage utilization: {}", e);
+                50 // Default fallback on error
+            }
+        };
+
+        // Update cache
+        {
+            let mut cached = self.cached_utilization.write().await;
+            cached.percent = utilization;
+            cached.last_computed = Utc::now();
+        }
+
+        utilization
     }
 
     /// Get the policy config
@@ -64,6 +128,9 @@ impl<B: P2StorageBackend> TemperaturePolicyExecutor<B> {
         let tracker = self.access_tracker.read().await;
         let mut candidates = Vec::new();
 
+        // Get actual storage utilization
+        let storage_utilization = self.get_storage_utilization().await;
+
         for metadata in payloads {
             // Build migration context
             let context = MigrationContext {
@@ -74,7 +141,7 @@ impl<B: P2StorageBackend> TemperaturePolicyExecutor<B> {
                 size_bytes: metadata.size_bytes,
                 access_history: tracker.get_history(&metadata.ref_id),
                 explicit_request: false,
-                storage_utilization_percent: 50, // TODO: Get actual utilization
+                storage_utilization_percent: storage_utilization,
                 tags: metadata.tags.clone(),
             };
 

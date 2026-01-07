@@ -135,8 +135,46 @@ impl P2StorageBackend for LocalStorageBackend {
 
         debug!("Writing payload {} ({} bytes)", ref_id, data.len());
 
-        // Write data file
+        // APPEND-ONLY INVARIANT: Check if payload already exists
+        // With content-addressed storage, same ref_id means same content
         let data_path = self.get_data_path(&ref_id, metadata.temperature);
+        if data_path.exists() {
+            // Payload already exists - verify checksum matches (idempotent write)
+            let existing_data = fs::read(&data_path).await.map_err(|e| {
+                StorageError::ReadFailed(format!("Failed to read existing file: {}", e))
+            })?;
+            let existing_checksum = Digest::blake3(&existing_data);
+            if existing_checksum == checksum {
+                debug!("Payload {} already exists with matching checksum, returning existing", ref_id);
+                // Return the existing reference (idempotent)
+                if let Ok(existing_meta) = self.load_metadata(&ref_id).await {
+                    let encryption_meta_digest = Digest::blake3(
+                        format!("enc:{}:{}", existing_meta.encryption_key_version, existing_meta.temperature.latency_description())
+                            .as_bytes()
+                    );
+                    return Ok(SealedPayloadRef::new(
+                        ref_id,
+                        checksum,
+                        encryption_meta_digest,
+                        data.len() as u64,
+                    ));
+                }
+            } else {
+                // Different content with same ref_id - this should never happen with proper hashing
+                return Err(StorageError::WriteFailed(
+                    format!("CRITICAL: Hash collision detected for ref_id {}", ref_id)
+                ));
+            }
+        }
+
+        // Create parent directory if needed
+        if let Some(parent) = data_path.parent() {
+            fs::create_dir_all(parent).await.map_err(|e| {
+                StorageError::WriteFailed(format!("Failed to create directory: {}", e))
+            })?;
+        }
+
+        // Write data file (new file only - checked above)
         let mut file = fs::File::create(&data_path).await.map_err(|e| {
             StorageError::WriteFailed(format!("Failed to create file: {}", e))
         })?;
@@ -149,6 +187,14 @@ impl P2StorageBackend for LocalStorageBackend {
 
         // Create and save metadata
         let now = Utc::now();
+
+        // Compute encryption metadata digest using consistent format
+        let encryption_meta_str = format!(
+            "encryption:v1:key_version={}",
+            metadata.encryption_key_version
+        );
+        let encryption_meta_digest = Digest::blake3(encryption_meta_str.as_bytes());
+
         let payload_meta = PayloadMetadata {
             ref_id: ref_id.clone(),
             content_type: metadata.content_type,
@@ -161,14 +207,11 @@ impl P2StorageBackend for LocalStorageBackend {
             encryption_key_version: metadata.encryption_key_version,
             owner_id: metadata.owner_id,
             tags: metadata.tags,
+            encryption_meta_digest: Some(encryption_meta_digest.to_hex()),
         };
         self.save_metadata(&ref_id, &payload_meta).await?;
 
-        // Create SealedPayloadRef
-        let encryption_meta_digest = Digest::blake3(
-            format!("enc:{}:{}", payload_meta.encryption_key_version, metadata.temperature.latency_description())
-                .as_bytes()
-        );
+        // Create SealedPayloadRef (use the same digest computed above)
 
         let payload_ref = SealedPayloadRef {
             ref_id: ref_id.clone(),
@@ -275,11 +318,17 @@ impl P2StorageBackend for LocalStorageBackend {
 
         info!("Migrated {} from {:?} to {:?}", ref_id, current_temp, target_temp);
 
+        // Compute encryption_meta_digest from encryption metadata
+        let encryption_meta_digest = Digest::blake3(
+            format!("enc:{}:{}", meta.encryption_key_version, target_temp.latency_description())
+                .as_bytes()
+        );
+
         // Return updated ref
         Ok(SealedPayloadRef {
             ref_id: ref_id.to_string(),
             checksum: Digest::from_hex(&meta.checksum).unwrap_or_default(),
-            encryption_meta_digest: Digest::zero(),
+            encryption_meta_digest,
             access_policy_version: "v1".to_string(),
             size_bytes: meta.size_bytes,
             status: meta.status,
@@ -352,65 +401,8 @@ impl P2StorageBackend for LocalStorageBackend {
     }
 }
 
-// Implement Serialize/Deserialize for PayloadMetadata
-impl serde::Serialize for PayloadMetadata {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("PayloadMetadata", 11)?;
-        state.serialize_field("ref_id", &self.ref_id)?;
-        state.serialize_field("content_type", &self.content_type)?;
-        state.serialize_field("size_bytes", &self.size_bytes)?;
-        state.serialize_field("checksum", &self.checksum)?;
-        state.serialize_field("temperature", &self.temperature)?;
-        state.serialize_field("status", &self.status)?;
-        state.serialize_field("created_at", &self.created_at)?;
-        state.serialize_field("last_accessed_at", &self.last_accessed_at)?;
-        state.serialize_field("encryption_key_version", &self.encryption_key_version)?;
-        state.serialize_field("owner_id", &self.owner_id)?;
-        state.serialize_field("tags", &self.tags)?;
-        state.end()
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for PayloadMetadata {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(serde::Deserialize)]
-        struct Helper {
-            ref_id: String,
-            content_type: String,
-            size_bytes: u64,
-            checksum: String,
-            temperature: StorageTemperature,
-            status: SealedPayloadStatus,
-            created_at: chrono::DateTime<chrono::Utc>,
-            last_accessed_at: Option<chrono::DateTime<chrono::Utc>>,
-            encryption_key_version: String,
-            owner_id: Option<String>,
-            tags: Vec<String>,
-        }
-
-        let helper = Helper::deserialize(deserializer)?;
-        Ok(PayloadMetadata {
-            ref_id: helper.ref_id,
-            content_type: helper.content_type,
-            size_bytes: helper.size_bytes,
-            checksum: helper.checksum,
-            temperature: helper.temperature,
-            status: helper.status,
-            created_at: helper.created_at,
-            last_accessed_at: helper.last_accessed_at,
-            encryption_key_version: helper.encryption_key_version,
-            owner_id: helper.owner_id,
-            tags: helper.tags,
-        })
-    }
-}
+// Note: Serialize/Deserialize for PayloadMetadata is now derived in traits.rs
+// This allows the encryption_meta_digest field to be properly handled
 
 #[cfg(test)]
 mod tests {
