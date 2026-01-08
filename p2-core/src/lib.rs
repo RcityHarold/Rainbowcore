@@ -53,9 +53,14 @@
 //! Hard rule: Missing payload_map_commit MUST be level B.
 
 pub mod crypto;
+pub mod degraded_mode;
 pub mod error;
 pub mod ledger;
+pub mod node_admission;
+pub mod rtbf;
+pub mod sampling_audit;
 pub mod types;
+pub mod verification;
 
 // Re-export commonly used types
 pub use error::{P2Error, P2Result};
@@ -94,6 +99,43 @@ pub use crypto::{
     // Key Rotation
     KeyManager, KeyMetadata, KeyRotationStats, KeyStatus, KeyType,
     ReEncryptionJob, ReEncryptionStatus, RotationConfig,
+};
+
+pub use degraded_mode::{
+    DegradedModeManager, DegradedModePolicy, DegradedModeState, DsnAvailabilityState,
+    OperationCheck, OperationType, RecoveryProgress, StateTransition,
+    DegradedModeError, DegradedModeResult,
+};
+
+pub use rtbf::{
+    RtbfCoordinator, RtbfConfig, RtbfRequest, RtbfScope, RtbfReason, RtbfStatus,
+    RtbfLedgerInterface, RtbfStorageInterface, RtbfAuditEntry, RtbfAuditOperation,
+    LegalHoldStatus, LegalHoldInfo, PayloadInventory, PayloadType, RetentionReason,
+    BatchTombstoneResult, TombstoneFailure, PayloadMetadataInfo,
+    RtbfError, RtbfResult as RtbfOpResult,
+};
+
+pub use verification::{
+    NonPlatformVerifier, NonPlatformConfig, VerificationService, VerificationRequirements,
+    VerifiableEvidence, VerificationAnchor, AnchorType, AnchorData, AnchorVerificationStatus,
+    EvidenceVerificationStatus, VerificationReport, AnchorSummary, RequirementsCheckResult,
+    RequirementIssue, RequirementIssueType, MerkleProofNode, MerklePosition, WitnessSignature,
+    VerificationError, VerificationResult,
+};
+
+pub use node_admission::{
+    NodeAdmissionController, AdmissionPolicy, ConnectedNode, NodeType, RegistrationStatus,
+    NodeAddress, NetworkProtocol, NodeCapabilities, TrustScore, TrustEvent, TrustEventType,
+    RegistrationRequest, HealthCheckResult, NodeHealthChecker, NodeStats, BanRecord,
+    AdmissionError, AdmissionResult,
+};
+
+pub use sampling_audit::{
+    SamplingAuditEngine, SamplingConfig, SamplingStrategy, SamplingRun, SamplingRunStatus,
+    SampleResult, SamplingFailureReason, MustOpenTrigger, MustOpenReason, MustOpenStatus,
+    EscalationLevel, MustOpenResolution, ResolutionType, SamplingPayloadProvider,
+    NotificationHandler, PayloadInfo, PayloadTemperature, SamplingStats,
+    SamplingError, SamplingResult,
 };
 
 /// P2 version

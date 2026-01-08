@@ -42,7 +42,9 @@ pub mod config;
 pub mod error;
 pub mod failover;
 pub mod health_monitor;
+pub mod invariants;
 pub mod ops;
+pub mod performance;
 pub mod replication;
 pub mod retention;
 pub mod router;
@@ -112,6 +114,24 @@ pub use compliance::{
     ComplianceChecker, ComplianceContext, CompliancePolicy, ComplianceRule, ComplianceRuleSet,
     ComplianceStatus, PolicyAction, PolicyCondition, PolicyEnforcer, PolicyViolation,
     RuleCategory, RuleSeverity, RuleViolation,
+};
+pub use invariants::{
+    AppendOnlyError, AppendOnlyGuard, AppendOnlyResult, AuditSeverity, CiphertextError,
+    CiphertextValidation, CiphertextValidator, DeletionError, DeletionGuard, DeletionRequest,
+    DeletionResult, EncryptionFormat, ExistenceProof, InvariantAuditEntry, InvariantAuditLogger,
+    InvariantCheck, InvariantCheckResult, InvariantConfig, InvariantEnforcedStorage,
+    InvariantViolationType, TombstoneRecord, WriteCheckResult, WriteOperation,
+};
+pub use performance::{
+    AcceptanceCriterion, AcceptanceReport, DailySampler, DailySamplingConfig, DailySamplingResult,
+    LatencyStats, PerformanceCollector,
+    // Testing infrastructure (ISSUE-028, ISSUE-029)
+    testing::{
+        PerformanceTestConfig, PerformanceTestResult, PerformanceTestHarness,
+        LatencyPercentiles, CurrentMetrics,
+        FaultType, FaultConfig, FaultTestResult, FaultInjector, FaultTestHarness,
+        OperationStats, DataIntegrityResult,
+    },
 };
 
 /// Storage version

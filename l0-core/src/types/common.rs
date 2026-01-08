@@ -6,6 +6,29 @@
 use serde::{Deserialize, Serialize};
 use soulbase_crypto::Digester;
 use std::fmt;
+use thiserror::Error;
+
+/// Error type for digest operations
+#[derive(Error, Debug, Clone, PartialEq, Eq)]
+pub enum DigestError {
+    /// Digest has wrong length
+    #[error("Invalid digest length: expected {expected} bytes, got {actual}")]
+    InvalidLength { expected: usize, actual: usize },
+
+    /// Invalid hex string
+    #[error("Invalid hex string: {0}")]
+    InvalidHex(String),
+
+    /// Digest computation failed
+    #[error("Digest computation failed: {0}")]
+    ComputationFailed(String),
+}
+
+impl From<hex::FromHexError> for DigestError {
+    fn from(err: hex::FromHexError) -> Self {
+        DigestError::InvalidHex(err.to_string())
+    }
+}
 
 /// 32-byte fixed-size digest for L0 protocol
 ///
@@ -51,15 +74,30 @@ impl L0Digest {
         self.0.iter().all(|&b| b == 0)
     }
 
-    /// Convert from soulbase_crypto::Digest
+    /// Try to convert from soulbase_crypto::Digest
     ///
-    /// Panics if the source digest is not 32 bytes.
-    pub fn from_soulbase(digest: &soulbase_crypto::Digest) -> Self {
+    /// Returns an error if the source digest is not 32 bytes.
+    pub fn try_from_soulbase(digest: &soulbase_crypto::Digest) -> Result<Self, DigestError> {
         let bytes = digest.as_bytes();
-        assert_eq!(bytes.len(), 32, "L0 requires 32-byte digests");
+        if bytes.len() != 32 {
+            return Err(DigestError::InvalidLength {
+                expected: 32,
+                actual: bytes.len(),
+            });
+        }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(bytes);
-        Self(arr)
+        Ok(Self(arr))
+    }
+
+    /// Convert from soulbase_crypto::Digest
+    ///
+    /// # Panics
+    /// Panics if the source digest is not 32 bytes.
+    /// Prefer `try_from_soulbase` for fallible conversion.
+    #[deprecated(since = "0.2.0", note = "Use try_from_soulbase for fallible conversion")]
+    pub fn from_soulbase(digest: &soulbase_crypto::Digest) -> Self {
+        Self::try_from_soulbase(digest).expect("L0 requires 32-byte digests")
     }
 
     /// Convert to soulbase_crypto::Digest (as BLAKE3)
@@ -76,14 +114,16 @@ impl L0Digest {
     pub fn blake3(data: &[u8]) -> Self {
         let digester = soulbase_crypto::DefaultDigester;
         let digest = digester.blake3(data).expect("blake3 should not fail");
-        Self::from_soulbase(&digest)
+        // BLAKE3 always produces 32 bytes, so this is safe
+        Self::try_from_soulbase(&digest).expect("BLAKE3 produces 32-byte digests")
     }
 
     /// Compute SHA256 digest using soulbase_crypto
     pub fn sha256(data: &[u8]) -> Self {
         let digester = soulbase_crypto::DefaultDigester;
         let digest = digester.sha256(data).expect("sha256 should not fail");
-        Self::from_soulbase(&digest)
+        // SHA256 always produces 32 bytes, so this is safe
+        Self::try_from_soulbase(&digest).expect("SHA256 produces 32-byte digests")
     }
 
     /// Combine two digests (for Merkle tree internal nodes)
@@ -161,6 +201,139 @@ impl Default for AnchoringState {
     fn default() -> Self {
         Self::LocalUnconfirmed
     }
+}
+
+/// Protocol version information (per DSN Doc Chapter 5)
+///
+/// All core objects must carry version information for compatibility
+/// checking and upgrade coordination.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtocolVersionInfo {
+    /// Canonicalization version - how objects are serialized
+    pub canonicalization_version: String,
+    /// Signer set version - which keys are valid
+    pub signer_set_version: String,
+    /// Anchor policy version - anchoring rules
+    pub anchor_policy_version: String,
+    /// Fee schedule version - pricing rules
+    pub fee_schedule_version: String,
+}
+
+impl Default for ProtocolVersionInfo {
+    fn default() -> Self {
+        Self {
+            canonicalization_version: "v1".to_string(),
+            signer_set_version: "v1".to_string(),
+            anchor_policy_version: "v1".to_string(),
+            fee_schedule_version: "v1".to_string(),
+        }
+    }
+}
+
+impl ProtocolVersionInfo {
+    /// Create a new version info with all versions set to v1
+    pub fn v1() -> Self {
+        Self::default()
+    }
+
+    /// Create a version info with custom versions
+    pub fn new(
+        canonicalization: &str,
+        signer_set: &str,
+        anchor_policy: &str,
+        fee_schedule: &str,
+    ) -> Self {
+        Self {
+            canonicalization_version: canonicalization.to_string(),
+            signer_set_version: signer_set.to_string(),
+            anchor_policy_version: anchor_policy.to_string(),
+            fee_schedule_version: fee_schedule.to_string(),
+        }
+    }
+
+    /// Check if all versions are compatible with another version info
+    pub fn is_compatible_with(&self, other: &Self) -> bool {
+        // For now, require exact match on canonicalization
+        // Other versions can drift within a major version
+        self.canonicalization_version == other.canonicalization_version
+            && self.major_version(&self.signer_set_version)
+                == self.major_version(&other.signer_set_version)
+    }
+
+    /// Extract major version number from version string
+    fn major_version(&self, version: &str) -> Option<u32> {
+        version
+            .trim_start_matches('v')
+            .split('.')
+            .next()
+            .and_then(|s| s.parse().ok())
+    }
+
+    /// Check if any version field is unknown/unsupported
+    pub fn has_unknown_version(&self) -> bool {
+        self.canonicalization_version.starts_with("unknown")
+            || self.signer_set_version.starts_with("unknown")
+            || self.anchor_policy_version.starts_with("unknown")
+            || self.fee_schedule_version.starts_with("unknown")
+    }
+
+    /// Get combined version digest for quick comparison
+    pub fn version_digest(&self) -> Digest {
+        let combined = format!(
+            "{}:{}:{}:{}",
+            self.canonicalization_version,
+            self.signer_set_version,
+            self.anchor_policy_version,
+            self.fee_schedule_version
+        );
+        Digest::blake3(combined.as_bytes())
+    }
+}
+
+/// Version drift information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionDrift {
+    /// Field with drift
+    pub field: VersionField,
+    /// Expected version
+    pub expected: String,
+    /// Actual version
+    pub actual: String,
+    /// Whether drift is acceptable
+    pub acceptable: bool,
+}
+
+/// Version fields
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VersionField {
+    Canonicalization,
+    SignerSet,
+    AnchorPolicy,
+    FeeSchedule,
+}
+
+/// Result of version compatibility check
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionCompatibility {
+    /// Overall compatibility
+    pub compatible: bool,
+    /// Detected drifts
+    pub drifts: Vec<VersionDrift>,
+    /// Recommended action
+    pub action: VersionAction,
+}
+
+/// Recommended action for version incompatibility
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VersionAction {
+    /// Continue normally
+    Proceed,
+    /// Warn but proceed
+    WarnAndProceed,
+    /// Upgrade required
+    UpgradeRequired,
+    /// Reject operation
+    Reject,
 }
 
 #[cfg(test)]

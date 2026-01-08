@@ -5,7 +5,7 @@
 
 use super::sealed_payload::SealedPayloadRef;
 use chrono::{DateTime, Utc};
-use l0_core::types::{ActorId, Digest, ReceiptId};
+use l0_core::types::{ActorId, Digest, EvidenceLevel, ReceiptId};
 use serde::{Deserialize, Serialize};
 
 /// Evidence Bundle - Encrypted evidence package
@@ -158,31 +158,10 @@ pub enum EvidenceType {
     Other,
 }
 
-/// Evidence level
-///
-/// Hard rule: Missing payload_map_commit MUST be level B
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EvidenceLevel {
-    /// A-level: receipt-backed + payload_map_commit reconciled
-    /// Can be used for strong verdicts/clawbacks
-    A,
-    /// B-level: missing receipt or map_commit
-    /// Temporary, needs backfill to upgrade
-    B,
-}
-
-impl EvidenceLevel {
-    /// Check if this level supports strong verdicts
-    pub fn supports_strong_verdicts(&self) -> bool {
-        matches!(self, EvidenceLevel::A)
-    }
-
-    /// Check if this level can be upgraded via backfill
-    pub fn upgradeable(&self) -> bool {
-        matches!(self, EvidenceLevel::B)
-    }
-}
+// EvidenceLevel is now imported from l0_core::types
+// See l0-core/src/types/common.rs for the canonical definition
+//
+// Hard rule: Missing payload_map_commit MUST be level B
 
 /// Evidence bundle status
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

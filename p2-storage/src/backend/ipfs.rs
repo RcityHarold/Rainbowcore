@@ -81,6 +81,55 @@ impl IpfsConfig {
             ..Default::default()
         }
     }
+
+    /// Validate configuration and log warnings for potential issues
+    ///
+    /// Returns true if valid, false if there are critical issues.
+    /// Logs warnings for non-critical issues.
+    pub fn validate(&self) -> bool {
+        let mut is_valid = true;
+
+        // Warn about localhost endpoints in non-local mode
+        if !self.use_local_node {
+            if self.api_endpoint.contains("127.0.0.1") || self.api_endpoint.contains("localhost") {
+                tracing::warn!(
+                    endpoint = %self.api_endpoint,
+                    "IPFS API endpoint points to localhost but use_local_node is false. \
+                     This may indicate misconfiguration."
+                );
+            }
+        }
+
+        // Warn about low replication factor
+        if self.pin_replication < 2 && !self.use_local_node {
+            tracing::warn!(
+                replication = self.pin_replication,
+                "IPFS pin replication factor is low. Consider setting to 2+ for production."
+            );
+        }
+
+        // Validate endpoint URL format
+        if !self.api_endpoint.starts_with("http://") && !self.api_endpoint.starts_with("https://") {
+            tracing::error!(
+                endpoint = %self.api_endpoint,
+                "IPFS API endpoint must start with http:// or https://"
+            );
+            is_valid = false;
+        }
+
+        // Warn about insecure http in production-like endpoints
+        if self.api_endpoint.starts_with("http://")
+            && !self.api_endpoint.contains("127.0.0.1")
+            && !self.api_endpoint.contains("localhost")
+        {
+            tracing::warn!(
+                endpoint = %self.api_endpoint,
+                "Using HTTP (not HTTPS) for remote IPFS endpoint. Consider using HTTPS."
+            );
+        }
+
+        is_valid
+    }
 }
 
 /// CID to ref_id mapping

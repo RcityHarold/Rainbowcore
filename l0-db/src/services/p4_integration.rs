@@ -230,6 +230,312 @@ fn chain_type_str(chain_type: AnchorChainType) -> &'static str {
     }
 }
 
+// ============================================================================
+// P4 Anchor Manager - Extended functionality for production use
+// ============================================================================
+
+use std::collections::HashMap;
+use chrono::{DateTime, Utc, Duration};
+use serde::{Deserialize, Serialize};
+
+/// Anchor submission status
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnchorSubmission {
+    /// Submission ID
+    pub submission_id: String,
+    /// Chain type
+    pub chain_type: AnchorChainType,
+    /// Epoch sequence number
+    pub epoch_sequence: u64,
+    /// Epoch root digest
+    pub epoch_root: Digest,
+    /// Transaction hash (once submitted)
+    pub tx_hash: Option<String>,
+    /// Current status
+    pub status: AnchorSubmissionStatus,
+    /// Number of confirmations
+    pub confirmations: u32,
+    /// Submission timestamp
+    pub submitted_at: Option<DateTime<Utc>>,
+    /// Confirmation timestamp
+    pub confirmed_at: Option<DateTime<Utc>>,
+    /// Number of retry attempts
+    pub retry_count: u32,
+    /// Last error message
+    pub last_error: Option<String>,
+    /// Created timestamp
+    pub created_at: DateTime<Utc>,
+}
+
+/// Anchor submission status
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnchorSubmissionStatus {
+    /// Pending submission
+    Pending,
+    /// Submitted to chain
+    Submitted,
+    /// Waiting for confirmations
+    Confirming,
+    /// Confirmed and finalized
+    Confirmed,
+    /// Submission failed
+    Failed,
+    /// Verification failed
+    VerificationFailed,
+}
+
+/// Anchor manager configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnchorManagerConfig {
+    /// Maximum retry attempts per submission
+    pub max_retries: u32,
+    /// Retry delay in seconds
+    pub retry_delay_secs: u64,
+    /// Confirmation check interval in seconds
+    pub confirmation_check_interval_secs: u64,
+    /// Enable automatic retries
+    pub auto_retry: bool,
+    /// Enable batch submissions
+    pub batch_submissions: bool,
+    /// Maximum batch size
+    pub max_batch_size: usize,
+}
+
+impl Default for AnchorManagerConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 3,
+            retry_delay_secs: 60,
+            confirmation_check_interval_secs: 30,
+            auto_retry: true,
+            batch_submissions: false,
+            max_batch_size: 10,
+        }
+    }
+}
+
+/// P4 Anchor Manager - manages anchor submissions with retry and confirmation tracking
+pub struct AnchorManager {
+    provider: Box<dyn AnchorProvider>,
+    config: AnchorManagerConfig,
+    submissions: std::sync::Mutex<HashMap<String, AnchorSubmission>>,
+}
+
+impl AnchorManager {
+    /// Create a new anchor manager
+    pub fn new(provider: Box<dyn AnchorProvider>, config: AnchorManagerConfig) -> Self {
+        Self {
+            provider,
+            config,
+            submissions: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Submit an anchor with tracking
+    pub async fn submit(
+        &self,
+        chain_type: AnchorChainType,
+        epoch_sequence: u64,
+        epoch_root: Digest,
+    ) -> LedgerResult<String> {
+        let submission_id = format!(
+            "anchor:{}:{}:{}",
+            chain_type_str(chain_type),
+            epoch_sequence,
+            Utc::now().timestamp_millis()
+        );
+
+        let mut submission = AnchorSubmission {
+            submission_id: submission_id.clone(),
+            chain_type,
+            epoch_sequence,
+            epoch_root: epoch_root.clone(),
+            tx_hash: None,
+            status: AnchorSubmissionStatus::Pending,
+            confirmations: 0,
+            submitted_at: None,
+            confirmed_at: None,
+            retry_count: 0,
+            last_error: None,
+            created_at: Utc::now(),
+        };
+
+        // Store submission
+        {
+            let mut submissions = self.submissions.lock()
+                .map_err(|_| LedgerError::Storage("Lock poisoned".to_string()))?;
+            submissions.insert(submission_id.clone(), submission.clone());
+        }
+
+        // Attempt submission
+        match self.provider.submit_anchor(chain_type, epoch_sequence, &epoch_root).await {
+            Ok(tx_hash) => {
+                submission.tx_hash = Some(tx_hash.clone());
+                submission.status = AnchorSubmissionStatus::Submitted;
+                submission.submitted_at = Some(Utc::now());
+
+                self.update_submission(&submission)?;
+
+                info!(
+                    "Anchor submitted: {} -> {} on {:?}",
+                    submission_id, tx_hash, chain_type
+                );
+
+                Ok(submission_id)
+            }
+            Err(e) => {
+                submission.status = AnchorSubmissionStatus::Failed;
+                submission.last_error = Some(e.to_string());
+                submission.retry_count = 1;
+
+                self.update_submission(&submission)?;
+
+                error!("Anchor submission failed: {}", e);
+                Err(e)
+            }
+        }
+    }
+
+    /// Check and update confirmation status
+    pub async fn check_confirmation(&self, submission_id: &str) -> LedgerResult<AnchorSubmission> {
+        let submission = {
+            let submissions = self.submissions.lock()
+                .map_err(|_| LedgerError::Storage("Lock poisoned".to_string()))?;
+            submissions.get(submission_id).cloned()
+                .ok_or_else(|| LedgerError::NotFound(format!("Submission not found: {}", submission_id)))?
+        };
+
+        let tx_hash = submission.tx_hash.as_ref()
+            .ok_or_else(|| LedgerError::InvalidOperation("No tx_hash for submission".to_string()))?;
+
+        let confirmations = self.provider
+            .check_confirmations(submission.chain_type, tx_hash)
+            .await?;
+
+        let required = self.provider.required_confirmations(submission.chain_type);
+
+        let mut updated = submission.clone();
+        updated.confirmations = confirmations;
+
+        if confirmations >= required {
+            // Verify the anchor
+            let verified = self.provider
+                .verify_anchor(
+                    submission.chain_type,
+                    tx_hash,
+                    submission.epoch_sequence,
+                    &submission.epoch_root,
+                )
+                .await?;
+
+            if verified {
+                updated.status = AnchorSubmissionStatus::Confirmed;
+                updated.confirmed_at = Some(Utc::now());
+                info!(
+                    "Anchor confirmed: {} with {} confirmations",
+                    submission_id, confirmations
+                );
+            } else {
+                updated.status = AnchorSubmissionStatus::VerificationFailed;
+                updated.last_error = Some("Anchor verification failed".to_string());
+                warn!("Anchor verification failed: {}", submission_id);
+            }
+        } else {
+            updated.status = AnchorSubmissionStatus::Confirming;
+            debug!(
+                "Anchor {} has {} of {} confirmations",
+                submission_id, confirmations, required
+            );
+        }
+
+        self.update_submission(&updated)?;
+        Ok(updated)
+    }
+
+    /// Retry a failed submission
+    pub async fn retry(&self, submission_id: &str) -> LedgerResult<()> {
+        let submission = {
+            let submissions = self.submissions.lock()
+                .map_err(|_| LedgerError::Storage("Lock poisoned".to_string()))?;
+            submissions.get(submission_id).cloned()
+                .ok_or_else(|| LedgerError::NotFound(format!("Submission not found: {}", submission_id)))?
+        };
+
+        if submission.status != AnchorSubmissionStatus::Failed {
+            return Err(LedgerError::InvalidOperation(
+                "Can only retry failed submissions".to_string()
+            ));
+        }
+
+        if submission.retry_count >= self.config.max_retries {
+            return Err(LedgerError::InvalidOperation(
+                format!("Max retries ({}) exceeded", self.config.max_retries)
+            ));
+        }
+
+        let mut updated = submission.clone();
+        updated.retry_count += 1;
+
+        match self.provider
+            .submit_anchor(submission.chain_type, submission.epoch_sequence, &submission.epoch_root)
+            .await
+        {
+            Ok(tx_hash) => {
+                updated.tx_hash = Some(tx_hash);
+                updated.status = AnchorSubmissionStatus::Submitted;
+                updated.submitted_at = Some(Utc::now());
+                updated.last_error = None;
+            }
+            Err(e) => {
+                updated.last_error = Some(e.to_string());
+            }
+        }
+
+        self.update_submission(&updated)
+    }
+
+    /// Get submission status
+    pub fn get_submission(&self, submission_id: &str) -> LedgerResult<Option<AnchorSubmission>> {
+        let submissions = self.submissions.lock()
+            .map_err(|_| LedgerError::Storage("Lock poisoned".to_string()))?;
+        Ok(submissions.get(submission_id).cloned())
+    }
+
+    /// Get all submissions for an epoch
+    pub fn get_epoch_submissions(&self, epoch_sequence: u64) -> LedgerResult<Vec<AnchorSubmission>> {
+        let submissions = self.submissions.lock()
+            .map_err(|_| LedgerError::Storage("Lock poisoned".to_string()))?;
+        Ok(submissions.values()
+            .filter(|s| s.epoch_sequence == epoch_sequence)
+            .cloned()
+            .collect())
+    }
+
+    /// Get pending submissions
+    pub fn get_pending_submissions(&self) -> LedgerResult<Vec<AnchorSubmission>> {
+        let submissions = self.submissions.lock()
+            .map_err(|_| LedgerError::Storage("Lock poisoned".to_string()))?;
+        Ok(submissions.values()
+            .filter(|s| matches!(
+                s.status,
+                AnchorSubmissionStatus::Pending |
+                AnchorSubmissionStatus::Submitted |
+                AnchorSubmissionStatus::Confirming
+            ))
+            .cloned()
+            .collect())
+    }
+
+    /// Update submission in storage
+    fn update_submission(&self, submission: &AnchorSubmission) -> LedgerResult<()> {
+        let mut submissions = self.submissions.lock()
+            .map_err(|_| LedgerError::Storage("Lock poisoned".to_string()))?;
+        submissions.insert(submission.submission_id.clone(), submission.clone());
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

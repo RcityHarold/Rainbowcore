@@ -219,6 +219,9 @@ impl LocalKeyStore {
     }
 
     /// Register a key reference (for metadata)
+    ///
+    /// # Panics
+    /// Panics if the internal lock is poisoned (indicates a bug in the application).
     pub fn register_key(&self, key_ref: &str) {
         let info = KeyInfo {
             key_ref: key_ref.to_string(),
@@ -228,7 +231,19 @@ impl LocalKeyStore {
             created_at: chrono::Utc::now().to_rfc3339(),
             expires_at: None,
         };
-        self.key_info.write().unwrap().insert(key_ref.to_string(), info);
+        // Use expect with context - lock poisoning indicates a critical bug
+        self.key_info
+            .write()
+            .expect("KeyStore lock poisoned - this indicates a bug in the application")
+            .insert(key_ref.to_string(), info);
+    }
+
+    /// Check if a key is registered (internal helper)
+    fn is_key_registered(&self, key_ref: &str) -> bool {
+        self.key_info
+            .read()
+            .expect("KeyStore lock poisoned - this indicates a bug in the application")
+            .contains_key(key_ref)
     }
 }
 
@@ -242,7 +257,7 @@ impl Default for LocalKeyStore {
 impl KeyStore for LocalKeyStore {
     async fn get_key(&self, key_ref: &str) -> Result<KeyMaterial, KeyStoreError> {
         // Auto-register if not exists
-        if !self.key_info.read().unwrap().contains_key(key_ref) {
+        if !self.is_key_registered(key_ref) {
             self.register_key(key_ref);
         }
         Ok(self.derive_key(key_ref))
@@ -258,10 +273,12 @@ impl KeyStore for LocalKeyStore {
 
     async fn get_key_info(&self, key_ref: &str) -> Result<KeyInfo, KeyStoreError> {
         // Auto-register if not exists
-        if !self.key_info.read().unwrap().contains_key(key_ref) {
+        if !self.is_key_registered(key_ref) {
             self.register_key(key_ref);
         }
-        self.key_info.read().unwrap()
+        self.key_info
+            .read()
+            .expect("KeyStore lock poisoned - this indicates a bug in the application")
             .get(key_ref)
             .cloned()
             .ok_or_else(|| KeyStoreError::NotFound(key_ref.to_string()))

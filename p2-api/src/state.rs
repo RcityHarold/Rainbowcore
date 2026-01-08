@@ -13,7 +13,9 @@
 
 use std::sync::Arc;
 
-use bridge::{L0CommitClient, MockL0Client};
+use bridge::L0CommitClient;
+#[cfg(test)]
+use bridge::MockL0Client;
 use p2_core::ledger::{FileAuditLedger, FileEvidenceLedger, FileSyncLedger, FileTicketLedger};
 use p2_storage::LocalStorageBackend;
 
@@ -60,15 +62,14 @@ impl AppState {
         Self::with_l0_client(storage_path, Arc::new(MockL0Client::new())).await
     }
 
-    /// Create application state with mock L0 client (DEVELOPMENT ONLY)
+    /// Create application state with mock L0 client (TESTING ONLY)
     ///
     /// # Security Warning
-    /// **DO NOT USE IN PRODUCTION!** This uses a mock L0 client that doesn't
+    /// **NOT FOR PRODUCTION!** This uses a mock L0 client that doesn't
     /// provide real commitment anchoring. Use `new()` with an L0 URL instead.
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use new(storage_path, l0_url) for production. This uses a mock L0 client."
-    )]
+    ///
+    /// This method is only available in test builds.
+    #[cfg(test)]
     pub async fn new_mock(storage_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         Self::with_l0_client(storage_path, Arc::new(MockL0Client::new())).await
     }
@@ -168,19 +169,16 @@ impl AppState {
         })
     }
 
-    /// Create with custom storage backend (DEPRECATED - uses mock L0 and /tmp)
+    /// Create with custom storage backend (TESTING ONLY)
     ///
     /// # Security Warning
-    /// **DO NOT USE IN PRODUCTION!**
+    /// **NOT FOR PRODUCTION!**
     /// - Uses mock L0 client (no real commitment anchoring)
     /// - Uses /tmp for ledger storage (data loss risk on restart)
     ///
+    /// This method is only available in test builds.
     /// Use `with_storage_and_l0(storage, l0_client, ledger_path)` instead.
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use with_storage_and_l0(storage, l0_client, ledger_path). This uses mock L0 and /tmp storage."
-    )]
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn with_storage(storage: Arc<LocalStorageBackend>) -> Self {
         Self::with_storage_and_l0(storage, Arc::new(MockL0Client::new()), "/tmp/p2-ledgers")
     }

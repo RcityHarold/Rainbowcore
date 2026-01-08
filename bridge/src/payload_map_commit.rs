@@ -96,13 +96,16 @@ impl PayloadMapCommit {
             .map(|r| r.checksum.clone())
             .collect();
 
+        // Build Merkle tree by combining pairs of digests
         while leaves.len() > 1 {
             let mut next_level = Vec::new();
             for chunk in leaves.chunks(2) {
                 let combined = match chunk {
                     [left, right] => Digest::combine(left, right),
                     [single] => single.clone(),
-                    _ => unreachable!(),
+                    // chunks(2) can only produce slices of length 1 or 2
+                    [] => unreachable!("chunks(2) never produces empty slices"),
+                    _ => unreachable!("chunks(2) never produces slices longer than 2"),
                 };
                 next_level.push(combined);
             }

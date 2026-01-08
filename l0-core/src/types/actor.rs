@@ -68,18 +68,114 @@ impl SpaceId {
 }
 
 /// Receipt ID - identifier for L0 receipts
+///
+/// Format: `receipt:{block_height}:{tx_index}:{hash_prefix}`
+/// Example: `receipt:12345:0:a1b2c3d4`
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ReceiptId(pub String);
 
 impl ReceiptId {
+    /// Create a new receipt ID (validated)
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
 
+    /// Create a receipt ID from components
+    pub fn from_components(block_height: u64, tx_index: u32, hash_prefix: &str) -> Self {
+        Self(format!("receipt:{}:{}:{}", block_height, tx_index, hash_prefix))
+    }
+
+    /// Parse receipt ID from string with validation
+    pub fn parse(s: &str) -> Result<Self, ReceiptIdError> {
+        if !s.starts_with("receipt:") {
+            return Err(ReceiptIdError::InvalidPrefix);
+        }
+
+        let parts: Vec<&str> = s.split(':').collect();
+        if parts.len() < 4 {
+            return Err(ReceiptIdError::InvalidFormat);
+        }
+
+        // Validate block height is numeric
+        parts[1].parse::<u64>().map_err(|_| ReceiptIdError::InvalidBlockHeight)?;
+
+        // Validate tx index is numeric
+        parts[2].parse::<u32>().map_err(|_| ReceiptIdError::InvalidTxIndex)?;
+
+        // Validate hash prefix is hex
+        if !parts[3].chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(ReceiptIdError::InvalidHashPrefix);
+        }
+
+        Ok(Self(s.to_string()))
+    }
+
+    /// Get the string representation
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Extract block height from receipt ID
+    pub fn block_height(&self) -> Option<u64> {
+        self.0.split(':').nth(1)?.parse().ok()
+    }
+
+    /// Extract tx index from receipt ID
+    pub fn tx_index(&self) -> Option<u32> {
+        self.0.split(':').nth(2)?.parse().ok()
+    }
+
+    /// Extract hash prefix from receipt ID
+    pub fn hash_prefix(&self) -> Option<&str> {
+        self.0.split(':').nth(3)
+    }
+
+    /// Check if this is a valid receipt ID format
+    pub fn is_valid_format(&self) -> bool {
+        Self::parse(&self.0).is_ok()
+    }
 }
+
+impl std::fmt::Display for ReceiptId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Default for ReceiptId {
+    fn default() -> Self {
+        Self("receipt:0:0:0000000000000000".to_string())
+    }
+}
+
+/// Receipt ID parsing error
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReceiptIdError {
+    /// Missing "receipt:" prefix
+    InvalidPrefix,
+    /// Invalid format (wrong number of parts)
+    InvalidFormat,
+    /// Block height is not a valid number
+    InvalidBlockHeight,
+    /// Tx index is not a valid number
+    InvalidTxIndex,
+    /// Hash prefix is not valid hex
+    InvalidHashPrefix,
+}
+
+impl std::fmt::Display for ReceiptIdError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReceiptIdError::InvalidPrefix => write!(f, "Receipt ID must start with 'receipt:'"),
+            ReceiptIdError::InvalidFormat => write!(f, "Invalid receipt ID format"),
+            ReceiptIdError::InvalidBlockHeight => write!(f, "Invalid block height in receipt ID"),
+            ReceiptIdError::InvalidTxIndex => write!(f, "Invalid tx index in receipt ID"),
+            ReceiptIdError::InvalidHashPrefix => write!(f, "Invalid hash prefix in receipt ID"),
+        }
+    }
+}
+
+impl std::error::Error for ReceiptIdError {}
 
 /// Actor type enumeration
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

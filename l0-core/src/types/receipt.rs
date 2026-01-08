@@ -117,6 +117,10 @@ pub struct FeeSchedule {
     pub discounts: std::collections::HashMap<String, u8>,
     /// Operations that are free (e.g., TipWitness)
     pub free_operations: Vec<String>,
+    /// Minimum fee after all discounts (prevents fee going to zero)
+    pub minimum_fee: u64,
+    /// Maximum total discount percentage (0-100, prevents stacking to 100%)
+    pub max_total_discount_percentage: u8,
 }
 
 impl Default for FeeSchedule {
@@ -134,6 +138,8 @@ impl Default for FeeSchedule {
             ],
             discounts: std::collections::HashMap::new(),
             free_operations: vec!["tip_witness".to_string()],
+            minimum_fee: 1,  // Minimum 1 unit fee
+            max_total_discount_percentage: 90, // Max 90% discount
         }
     }
 }
@@ -171,9 +177,366 @@ impl FeeSchedule {
         }
     }
 
+    /// Calculate fee with discount and subsidy support (ISSUE-020)
+    ///
+    /// Security: Enforces minimum fee and maximum total discount percentage
+    /// to prevent fee manipulation through discount stacking.
+    pub fn calculate_fee_with_discount(
+        &self,
+        units: FeeUnits,
+        units_count: u32,
+        risk_amount: Option<u64>,
+        actor_type: Option<&str>,
+        subsidy_pool: Option<&SubsidyPool>,
+        discount_code: Option<&DiscountCode>,
+    ) -> FeeCalculationResult {
+        // Start with base calculation
+        let base_calc = self.calculate_fee(units, units_count, risk_amount);
+        let mut current_fee = base_calc.final_fee;
+        let mut applied_discounts = Vec::new();
+        let mut applied_subsidies = Vec::new();
+        let mut total_discount_pct: u16 = 0; // Track cumulative discount percentage
+
+        // Calculate maximum allowed discount
+        let max_discount_amount = (base_calc.final_fee * self.max_total_discount_percentage as u64) / 100;
+        let min_allowed_fee = std::cmp::max(
+            self.minimum_fee,
+            base_calc.final_fee.saturating_sub(max_discount_amount)
+        );
+
+        // Apply actor type discount
+        if let Some(actor) = actor_type {
+            if let Some(&discount_pct) = self.discounts.get(actor) {
+                // Check if adding this discount would exceed max
+                if total_discount_pct + discount_pct as u16 <= self.max_total_discount_percentage as u16 {
+                    let discount_amount = (current_fee * discount_pct as u64) / 100;
+                    let new_fee = current_fee.saturating_sub(discount_amount);
+
+                    // Ensure minimum fee
+                    if new_fee >= min_allowed_fee {
+                        current_fee = new_fee;
+                        total_discount_pct += discount_pct as u16;
+                        applied_discounts.push(AppliedDiscount {
+                            discount_type: DiscountType::ActorType,
+                            percentage: discount_pct,
+                            amount: discount_amount,
+                            source: actor.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Apply discount code
+        if let Some(code) = discount_code {
+            if code.is_valid() {
+                // Check if adding this discount would exceed max
+                if total_discount_pct + code.percentage as u16 <= self.max_total_discount_percentage as u16 {
+                    let discount_amount = code.calculate_discount(current_fee);
+                    let new_fee = current_fee.saturating_sub(discount_amount);
+
+                    // Ensure minimum fee
+                    if new_fee >= min_allowed_fee {
+                        current_fee = new_fee;
+                        total_discount_pct += code.percentage as u16;
+                        applied_discounts.push(AppliedDiscount {
+                            discount_type: DiscountType::PromoCode,
+                            percentage: code.percentage,
+                            amount: discount_amount,
+                            source: code.code.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Apply subsidy from pool (subsidies don't count against discount limit)
+        if let Some(pool) = subsidy_pool {
+            if pool.is_active() && pool.remaining_balance > 0 {
+                // Subsidy can bring fee to minimum, but not below
+                let max_subsidy = current_fee.saturating_sub(self.minimum_fee);
+                let subsidy_amount = std::cmp::min(
+                    pool.max_per_operation,
+                    std::cmp::min(pool.remaining_balance, max_subsidy)
+                );
+                if subsidy_amount > 0 {
+                    current_fee = current_fee.saturating_sub(subsidy_amount);
+                    applied_subsidies.push(AppliedSubsidy {
+                        pool_id: pool.pool_id.clone(),
+                        amount: subsidy_amount,
+                        reason: pool.subsidy_reason.clone(),
+                    });
+                }
+            }
+        }
+
+        // Final minimum fee enforcement
+        current_fee = std::cmp::max(current_fee, self.minimum_fee);
+
+        FeeCalculationResult {
+            base_calculation: base_calc,
+            applied_discounts,
+            applied_subsidies,
+            final_fee_after_discounts: current_fee,
+            total_discount: base_calc.final_fee.saturating_sub(current_fee),
+            calculation_timestamp: chrono::Utc::now(),
+        }
+    }
+
+    /// Get discount for an actor type
+    pub fn get_actor_discount(&self, actor_type: &str) -> Option<u8> {
+        self.discounts.get(actor_type).copied()
+    }
+
+    /// Add or update an actor type discount
+    pub fn set_actor_discount(&mut self, actor_type: &str, percentage: u8) {
+        self.discounts.insert(actor_type.to_string(), percentage.min(100));
+    }
+
     /// Check if an operation is free
     pub fn is_free_operation(&self, operation: &str) -> bool {
         self.free_operations.contains(&operation.to_string())
+    }
+}
+
+// ============================================================================
+// FeeSchedule Discount Logic (ISSUE-020)
+// ============================================================================
+
+/// Type of discount applied
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscountType {
+    /// Discount based on actor type (e.g., node operator)
+    ActorType,
+    /// Promotional discount code
+    PromoCode,
+    /// Volume-based discount
+    Volume,
+    /// Early adopter discount
+    EarlyAdopter,
+    /// Partnership discount
+    Partnership,
+    /// Foundation/DAO subsidy
+    FoundationSubsidy,
+}
+
+/// Discount code for promotional discounts
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscountCode {
+    /// Unique code string
+    pub code: String,
+    /// Discount percentage (0-100)
+    pub percentage: u8,
+    /// Maximum discount amount (None = unlimited)
+    pub max_amount: Option<u64>,
+    /// Valid from timestamp
+    pub valid_from: DateTime<Utc>,
+    /// Valid until timestamp
+    pub valid_until: DateTime<Utc>,
+    /// Maximum uses (None = unlimited)
+    pub max_uses: Option<u32>,
+    /// Current use count
+    pub use_count: u32,
+    /// Eligible actor types (empty = all)
+    pub eligible_actors: Vec<String>,
+    /// Eligible operations (empty = all)
+    pub eligible_operations: Vec<String>,
+}
+
+impl DiscountCode {
+    /// Create a new discount code
+    pub fn new(code: String, percentage: u8, duration: chrono::Duration) -> Self {
+        let now = Utc::now();
+        Self {
+            code,
+            percentage: percentage.min(100),
+            max_amount: None,
+            valid_from: now,
+            valid_until: now + duration,
+            max_uses: None,
+            use_count: 0,
+            eligible_actors: Vec::new(),
+            eligible_operations: Vec::new(),
+        }
+    }
+
+    /// Check if the code is valid (time and use limits)
+    pub fn is_valid(&self) -> bool {
+        let now = Utc::now();
+        if now < self.valid_from || now > self.valid_until {
+            return false;
+        }
+        if let Some(max) = self.max_uses {
+            if self.use_count >= max {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Check if code is valid for a specific actor type
+    pub fn is_valid_for_actor(&self, actor_type: &str) -> bool {
+        self.eligible_actors.is_empty() || self.eligible_actors.contains(&actor_type.to_string())
+    }
+
+    /// Check if code is valid for a specific operation
+    pub fn is_valid_for_operation(&self, operation: &str) -> bool {
+        self.eligible_operations.is_empty() || self.eligible_operations.contains(&operation.to_string())
+    }
+
+    /// Calculate the discount amount for a given fee
+    pub fn calculate_discount(&self, fee: u64) -> u64 {
+        let discount = (fee * self.percentage as u64) / 100;
+        match self.max_amount {
+            Some(max) => std::cmp::min(discount, max),
+            None => discount,
+        }
+    }
+
+    /// Record a use of this code
+    pub fn record_use(&mut self) {
+        self.use_count += 1;
+    }
+}
+
+/// Subsidy pool for foundation/DAO subsidized operations
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubsidyPool {
+    /// Pool ID
+    pub pool_id: String,
+    /// Total pool balance
+    pub total_balance: u64,
+    /// Remaining balance
+    pub remaining_balance: u64,
+    /// Maximum subsidy per operation
+    pub max_per_operation: u64,
+    /// Eligible operations (empty = all)
+    pub eligible_operations: Vec<String>,
+    /// Reason for subsidy
+    pub subsidy_reason: String,
+    /// Pool active status
+    pub is_active: bool,
+    /// Created timestamp
+    pub created_at: DateTime<Utc>,
+    /// Expires at timestamp
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+impl SubsidyPool {
+    /// Create a new subsidy pool
+    pub fn new(pool_id: String, total_balance: u64, max_per_op: u64, reason: String) -> Self {
+        Self {
+            pool_id,
+            total_balance,
+            remaining_balance: total_balance,
+            max_per_operation: max_per_op,
+            eligible_operations: Vec::new(),
+            subsidy_reason: reason,
+            is_active: true,
+            created_at: Utc::now(),
+            expires_at: None,
+        }
+    }
+
+    /// Check if pool is active and has balance
+    pub fn is_active(&self) -> bool {
+        if !self.is_active || self.remaining_balance == 0 {
+            return false;
+        }
+        if let Some(expires) = self.expires_at {
+            if Utc::now() > expires {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Deduct from pool
+    pub fn deduct(&mut self, amount: u64) -> bool {
+        if amount > self.remaining_balance {
+            return false;
+        }
+        self.remaining_balance -= amount;
+        true
+    }
+
+    /// Refund to pool
+    pub fn refund(&mut self, amount: u64) {
+        self.remaining_balance = std::cmp::min(
+            self.remaining_balance + amount,
+            self.total_balance
+        );
+    }
+}
+
+/// Applied discount record
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppliedDiscount {
+    /// Type of discount
+    pub discount_type: DiscountType,
+    /// Percentage applied
+    pub percentage: u8,
+    /// Amount discounted
+    pub amount: u64,
+    /// Source (code, actor type, etc.)
+    pub source: String,
+}
+
+/// Applied subsidy record
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppliedSubsidy {
+    /// Pool ID
+    pub pool_id: String,
+    /// Amount subsidized
+    pub amount: u64,
+    /// Reason
+    pub reason: String,
+}
+
+/// Complete fee calculation result with discounts
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeeCalculationResult {
+    /// Base calculation before discounts
+    pub base_calculation: FeeCalculation,
+    /// All discounts applied
+    pub applied_discounts: Vec<AppliedDiscount>,
+    /// All subsidies applied
+    pub applied_subsidies: Vec<AppliedSubsidy>,
+    /// Final fee after all discounts and subsidies
+    pub final_fee_after_discounts: u64,
+    /// Total discount amount
+    pub total_discount: u64,
+    /// Calculation timestamp
+    pub calculation_timestamp: DateTime<Utc>,
+}
+
+impl FeeCalculationResult {
+    /// Get total discount percentage
+    pub fn total_discount_percentage(&self) -> f64 {
+        if self.base_calculation.final_fee == 0 {
+            return 0.0;
+        }
+        (self.total_discount as f64 / self.base_calculation.final_fee as f64) * 100.0
+    }
+
+    /// Check if any discount was applied
+    pub fn has_discounts(&self) -> bool {
+        !self.applied_discounts.is_empty()
+    }
+
+    /// Check if any subsidy was applied
+    pub fn has_subsidies(&self) -> bool {
+        !self.applied_subsidies.is_empty()
+    }
+
+    /// Get breakdown by discount type
+    pub fn discount_by_type(&self, dtype: DiscountType) -> u64 {
+        self.applied_discounts
+            .iter()
+            .filter(|d| d.discount_type == dtype)
+            .map(|d| d.amount)
+            .sum()
     }
 }
 

@@ -340,6 +340,429 @@ impl TicketVerification {
     }
 }
 
+// ============================================================================
+// Ticket Audit Atomicity (ISSUE-019)
+// ============================================================================
+
+/// Atomic ticket audit log entry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TicketAuditEntry {
+    /// Unique audit entry ID
+    pub audit_id: String,
+    /// Ticket ID being audited
+    pub ticket_id: String,
+    /// Actor ID that used the ticket
+    pub accessor_id: ActorId,
+    /// Operation performed
+    pub operation: TicketAuditOperation,
+    /// Timestamp of the operation
+    pub timestamp: DateTime<Utc>,
+    /// Result of the operation
+    pub result: TicketAuditResult,
+    /// Session ID (for grouping related operations)
+    pub session_id: Option<String>,
+    /// Request digest (for non-repudiation)
+    pub request_digest: Digest,
+    /// Response digest (for verification)
+    pub response_digest: Option<Digest>,
+    /// IP address or node ID (for tracing)
+    pub source_identifier: Option<String>,
+    /// Sequence number within session
+    pub sequence_no: u64,
+}
+
+impl TicketAuditEntry {
+    /// Create a new audit entry
+    pub fn new(
+        ticket_id: String,
+        accessor_id: ActorId,
+        operation: TicketAuditOperation,
+        request_digest: Digest,
+    ) -> Self {
+        Self {
+            audit_id: format!("audit:{}:{}", ticket_id, Utc::now().timestamp_micros()),
+            ticket_id,
+            accessor_id,
+            operation,
+            timestamp: Utc::now(),
+            result: TicketAuditResult::Pending,
+            session_id: None,
+            request_digest,
+            response_digest: None,
+            source_identifier: None,
+            sequence_no: 0,
+        }
+    }
+
+    /// Set the result of the operation
+    pub fn set_result(&mut self, result: TicketAuditResult, response_digest: Option<Digest>) {
+        self.result = result;
+        self.response_digest = response_digest;
+    }
+
+    /// Compute the audit entry digest for chain linking
+    pub fn compute_digest(&self) -> Digest {
+        let mut data = Vec::new();
+        data.extend_from_slice(self.audit_id.as_bytes());
+        data.extend_from_slice(self.ticket_id.as_bytes());
+        data.extend_from_slice(self.accessor_id.0.as_bytes());
+        data.extend_from_slice(self.timestamp.to_rfc3339().as_bytes());
+        data.extend_from_slice(self.request_digest.as_bytes());
+        if let Some(ref resp) = self.response_digest {
+            data.extend_from_slice(resp.as_bytes());
+        }
+        Digest::blake3(&data)
+    }
+}
+
+/// Type of ticket audit operation
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TicketAuditOperation {
+    /// Ticket was created
+    Created,
+    /// Ticket was validated
+    Validated,
+    /// Ticket was used to access data
+    AccessGranted,
+    /// Access was denied
+    AccessDenied,
+    /// Ticket was revoked
+    Revoked,
+    /// Ticket expired
+    Expired,
+    /// Approval was added
+    ApprovalAdded,
+    /// Ticket was renewed/extended
+    Renewed,
+}
+
+/// Result of a ticket audit operation
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TicketAuditResult {
+    /// Operation pending
+    Pending,
+    /// Operation succeeded
+    Success,
+    /// Operation failed
+    Failed,
+    /// Operation was rejected
+    Rejected,
+    /// Operation timed out
+    Timeout,
+}
+
+/// Internal state for ticket audit logger
+#[derive(Debug)]
+struct TicketAuditLoggerInner {
+    /// Current session ID
+    session_id: String,
+    /// Sequence counter
+    sequence: u64,
+    /// Pending entries (not yet committed)
+    pending: Vec<TicketAuditEntry>,
+    /// Committed entries
+    committed: Vec<TicketAuditEntry>,
+    /// Previous entry digest (for chaining)
+    prev_digest: Option<Digest>,
+}
+
+/// Atomic ticket audit logger (single-threaded version)
+///
+/// For multi-threaded usage, use `SyncTicketAuditLogger` instead.
+#[derive(Debug)]
+pub struct TicketAuditLogger {
+    inner: TicketAuditLoggerInner,
+}
+
+impl TicketAuditLogger {
+    /// Create a new audit logger
+    pub fn new() -> Self {
+        Self {
+            inner: TicketAuditLoggerInner {
+                session_id: format!("session:{}", Utc::now().timestamp_micros()),
+                sequence: 0,
+                pending: Vec::new(),
+                committed: Vec::new(),
+                prev_digest: None,
+            },
+        }
+    }
+
+    /// Begin a new audit operation (returns entry for later completion)
+    pub fn begin_operation(
+        &mut self,
+        ticket_id: String,
+        accessor_id: ActorId,
+        operation: TicketAuditOperation,
+        request_digest: Digest,
+    ) -> usize {
+        let mut entry = TicketAuditEntry::new(ticket_id, accessor_id, operation, request_digest);
+        entry.session_id = Some(self.inner.session_id.clone());
+        entry.sequence_no = self.inner.sequence;
+        self.inner.sequence += 1;
+
+        self.inner.pending.push(entry);
+        self.inner.pending.len() - 1
+    }
+
+    /// Complete an audit operation
+    pub fn complete_operation(
+        &mut self,
+        index: usize,
+        result: TicketAuditResult,
+        response_digest: Option<Digest>,
+    ) -> Result<TicketAuditEntry, String> {
+        if index >= self.inner.pending.len() {
+            return Err("Invalid operation index".to_string());
+        }
+
+        let mut entry = self.inner.pending.remove(index);
+        entry.set_result(result, response_digest);
+
+        // Chain to previous entry
+        if let Some(ref prev) = self.inner.prev_digest {
+            // Include prev digest in this entry's digest computation
+            let mut chain_data = prev.as_bytes().to_vec();
+            chain_data.extend_from_slice(entry.compute_digest().as_bytes());
+            self.inner.prev_digest = Some(Digest::blake3(&chain_data));
+        } else {
+            self.inner.prev_digest = Some(entry.compute_digest());
+        }
+
+        self.inner.committed.push(entry.clone());
+        Ok(entry)
+    }
+
+    /// Abort a pending operation
+    pub fn abort_operation(&mut self, index: usize) -> Result<(), String> {
+        if index >= self.inner.pending.len() {
+            return Err("Invalid operation index".to_string());
+        }
+
+        let mut entry = self.inner.pending.remove(index);
+        entry.set_result(TicketAuditResult::Failed, None);
+
+        // Still record the aborted operation for audit trail
+        self.inner.committed.push(entry);
+        Ok(())
+    }
+
+    /// Get all committed entries
+    pub fn get_committed(&self) -> &[TicketAuditEntry] {
+        &self.inner.committed
+    }
+
+    /// Get pending operations count
+    pub fn pending_count(&self) -> usize {
+        self.inner.pending.len()
+    }
+
+    /// Compute the audit chain digest (for verification)
+    pub fn chain_digest(&self) -> Option<Digest> {
+        self.inner.prev_digest.clone()
+    }
+
+    /// Export audit log for external storage
+    pub fn export(&self) -> TicketAuditLog {
+        TicketAuditLog {
+            session_id: self.inner.session_id.clone(),
+            entries: self.inner.committed.clone(),
+            chain_digest: self.inner.prev_digest.clone(),
+            exported_at: Utc::now(),
+        }
+    }
+}
+
+impl Default for TicketAuditLogger {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Thread-safe ticket audit logger
+///
+/// Uses internal locking to ensure safe concurrent access.
+/// Each operation acquires a lock for the duration of the operation.
+#[derive(Debug)]
+pub struct SyncTicketAuditLogger {
+    inner: std::sync::Mutex<TicketAuditLoggerInner>,
+}
+
+impl SyncTicketAuditLogger {
+    /// Create a new thread-safe audit logger
+    pub fn new() -> Self {
+        Self {
+            inner: std::sync::Mutex::new(TicketAuditLoggerInner {
+                session_id: format!("session:{}", Utc::now().timestamp_micros()),
+                sequence: 0,
+                pending: Vec::new(),
+                committed: Vec::new(),
+                prev_digest: None,
+            }),
+        }
+    }
+
+    /// Begin a new audit operation (returns entry for later completion)
+    ///
+    /// Returns an error if the lock is poisoned.
+    pub fn begin_operation(
+        &self,
+        ticket_id: String,
+        accessor_id: ActorId,
+        operation: TicketAuditOperation,
+        request_digest: Digest,
+    ) -> Result<usize, String> {
+        let mut guard = self.inner.lock()
+            .map_err(|e| format!("Lock poisoned: {}", e))?;
+
+        let mut entry = TicketAuditEntry::new(ticket_id, accessor_id, operation, request_digest);
+        entry.session_id = Some(guard.session_id.clone());
+        entry.sequence_no = guard.sequence;
+        guard.sequence += 1;
+
+        guard.pending.push(entry);
+        Ok(guard.pending.len() - 1)
+    }
+
+    /// Complete an audit operation
+    pub fn complete_operation(
+        &self,
+        index: usize,
+        result: TicketAuditResult,
+        response_digest: Option<Digest>,
+    ) -> Result<TicketAuditEntry, String> {
+        let mut guard = self.inner.lock()
+            .map_err(|e| format!("Lock poisoned: {}", e))?;
+
+        if index >= guard.pending.len() {
+            return Err("Invalid operation index".to_string());
+        }
+
+        let mut entry = guard.pending.remove(index);
+        entry.set_result(result, response_digest);
+
+        // Chain to previous entry
+        if let Some(ref prev) = guard.prev_digest {
+            let mut chain_data = prev.as_bytes().to_vec();
+            chain_data.extend_from_slice(entry.compute_digest().as_bytes());
+            guard.prev_digest = Some(Digest::blake3(&chain_data));
+        } else {
+            guard.prev_digest = Some(entry.compute_digest());
+        }
+
+        guard.committed.push(entry.clone());
+        Ok(entry)
+    }
+
+    /// Abort a pending operation
+    pub fn abort_operation(&self, index: usize) -> Result<(), String> {
+        let mut guard = self.inner.lock()
+            .map_err(|e| format!("Lock poisoned: {}", e))?;
+
+        if index >= guard.pending.len() {
+            return Err("Invalid operation index".to_string());
+        }
+
+        let mut entry = guard.pending.remove(index);
+        entry.set_result(TicketAuditResult::Failed, None);
+        guard.committed.push(entry);
+        Ok(())
+    }
+
+    /// Get a copy of all committed entries
+    pub fn get_committed(&self) -> Result<Vec<TicketAuditEntry>, String> {
+        let guard = self.inner.lock()
+            .map_err(|e| format!("Lock poisoned: {}", e))?;
+        Ok(guard.committed.clone())
+    }
+
+    /// Get pending operations count
+    pub fn pending_count(&self) -> Result<usize, String> {
+        let guard = self.inner.lock()
+            .map_err(|e| format!("Lock poisoned: {}", e))?;
+        Ok(guard.pending.len())
+    }
+
+    /// Compute the audit chain digest (for verification)
+    pub fn chain_digest(&self) -> Result<Option<Digest>, String> {
+        let guard = self.inner.lock()
+            .map_err(|e| format!("Lock poisoned: {}", e))?;
+        Ok(guard.prev_digest.clone())
+    }
+
+    /// Export audit log for external storage
+    pub fn export(&self) -> Result<TicketAuditLog, String> {
+        let guard = self.inner.lock()
+            .map_err(|e| format!("Lock poisoned: {}", e))?;
+        Ok(TicketAuditLog {
+            session_id: guard.session_id.clone(),
+            entries: guard.committed.clone(),
+            chain_digest: guard.prev_digest.clone(),
+            exported_at: Utc::now(),
+        })
+    }
+}
+
+impl Default for SyncTicketAuditLogger {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// SyncTicketAuditLogger is Send + Sync because it uses Mutex internally
+unsafe impl Send for SyncTicketAuditLogger {}
+unsafe impl Sync for SyncTicketAuditLogger {}
+
+/// Exportable audit log
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TicketAuditLog {
+    /// Session ID
+    pub session_id: String,
+    /// All audit entries
+    pub entries: Vec<TicketAuditEntry>,
+    /// Chain digest for verification
+    pub chain_digest: Option<Digest>,
+    /// Export timestamp
+    pub exported_at: DateTime<Utc>,
+}
+
+impl TicketAuditLog {
+    /// Verify the audit chain integrity
+    pub fn verify_chain(&self) -> bool {
+        if self.entries.is_empty() {
+            return self.chain_digest.is_none();
+        }
+
+        let mut prev_digest: Option<Digest> = None;
+
+        for entry in &self.entries {
+            let entry_digest = entry.compute_digest();
+
+            if let Some(ref prev) = prev_digest {
+                let mut chain_data = prev.as_bytes().to_vec();
+                chain_data.extend_from_slice(entry_digest.as_bytes());
+                prev_digest = Some(Digest::blake3(&chain_data));
+            } else {
+                prev_digest = Some(entry_digest);
+            }
+        }
+
+        prev_digest == self.chain_digest
+    }
+
+    /// Get entries for a specific ticket
+    pub fn entries_for_ticket(&self, ticket_id: &str) -> Vec<&TicketAuditEntry> {
+        self.entries.iter().filter(|e| e.ticket_id == ticket_id).collect()
+    }
+
+    /// Get entries by operation type
+    pub fn entries_by_operation(&self, operation: TicketAuditOperation) -> Vec<&TicketAuditEntry> {
+        self.entries.iter().filter(|e| e.operation == operation).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

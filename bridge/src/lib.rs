@@ -45,6 +45,7 @@
 //! ```
 
 pub mod backfill;
+pub mod cross_node_sync;
 pub mod error;
 pub mod evidence_level;
 pub mod l0_client;
@@ -54,6 +55,11 @@ pub mod three_phase_sync;
 pub use backfill::{
     BackfillBatchResult, BackfillEntry, BackfillExecutor, BackfillLedger, BackfillResult,
     BackfillStats, BackfillStatus, EvidenceUpdater, InMemoryBackfillLedger,
+};
+pub use cross_node_sync::{
+    CrossNodeSyncConfig, CrossNodeSyncCoordinator, NodeInfo, NodeInfoUpdate, NodeType,
+    PayloadSyncRequest, PayloadSyncResponse, SyncFailure, SyncFailureReason, SyncPriority,
+    SyncReason, SyncStats,
 };
 pub use error::{BridgeError, BridgeResult};
 pub use evidence_level::{

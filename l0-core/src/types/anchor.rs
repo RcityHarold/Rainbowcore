@@ -323,6 +323,200 @@ impl Default for AnchorPriority {
     }
 }
 
+impl AnchorPriority {
+    /// Determine anchor priority from batch type
+    /// According to DSN documentation:
+    /// - MUST: VerdictBatch, REVOKED, major RepairCheckpoint
+    /// - SHOULD: high-risk ConsentBatch, critical SelfOnset
+    /// - MAY: normal logs, normal narratives
+    pub fn from_batch_type(batch_type: &str, is_high_risk: bool) -> Self {
+        match batch_type {
+            "verdict_batch" | "revoked" | "major_repair_checkpoint" => Self::Must,
+            "consent_batch" if is_high_risk => Self::Should,
+            "self_onset" if is_high_risk => Self::Should,
+            "repair_checkpoint" => Self::Should,
+            _ => Self::May,
+        }
+    }
+
+    /// Get the budget allocation type for this priority
+    pub fn budget_type(&self) -> AnchorBudgetType {
+        match self {
+            Self::Must => AnchorBudgetType::PublicOnly,
+            Self::Should => AnchorBudgetType::PublicWithOptional,
+            Self::May => AnchorBudgetType::SelfFundedOnly,
+        }
+    }
+
+    /// Check if this priority level can be skipped
+    pub fn can_skip(&self) -> bool {
+        matches!(self, Self::May)
+    }
+
+    /// Check if public budget can be used
+    pub fn allows_public_budget(&self) -> bool {
+        matches!(self, Self::Must | Self::Should)
+    }
+
+    /// Get the maximum delay allowed before escalation (in seconds)
+    pub fn max_delay_seconds(&self) -> u64 {
+        match self {
+            Self::Must => 300,    // 5 minutes
+            Self::Should => 3600, // 1 hour
+            Self::May => 86400,   // 24 hours
+        }
+    }
+}
+
+/// Budget allocation type for anchoring
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnchorBudgetType {
+    /// Paid entirely by public budget (Foundation/DAO)
+    PublicOnly,
+    /// Public budget primary, optional Actor/Node contribution
+    PublicWithOptional,
+    /// Actor/Node self-funding only
+    SelfFundedOnly,
+}
+
+/// Anchor request with priority and budget information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnchorRequest {
+    /// Request ID
+    pub request_id: String,
+    /// Epoch to anchor
+    pub epoch_root: Digest,
+    /// Epoch sequence number
+    pub epoch_sequence: u64,
+    /// Determined priority
+    pub priority: AnchorPriority,
+    /// Budget allocation
+    pub budget_type: AnchorBudgetType,
+    /// Requesting actor (for self-funded)
+    pub requester: Option<String>,
+    /// Batch type that triggered this request
+    pub trigger_batch_type: String,
+    /// Whether the triggering batch is high-risk
+    pub is_high_risk: bool,
+    /// Created timestamp
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Deadline for anchoring
+    pub deadline: chrono::DateTime<chrono::Utc>,
+    /// Current status
+    pub status: AnchorRequestStatus,
+}
+
+impl AnchorRequest {
+    /// Create a new anchor request with automatic priority determination
+    pub fn new(
+        request_id: String,
+        epoch_root: Digest,
+        epoch_sequence: u64,
+        trigger_batch_type: String,
+        is_high_risk: bool,
+        requester: Option<String>,
+    ) -> Self {
+        let priority = AnchorPriority::from_batch_type(&trigger_batch_type, is_high_risk);
+        let budget_type = priority.budget_type();
+        let created_at = chrono::Utc::now();
+        let deadline = created_at + chrono::Duration::seconds(priority.max_delay_seconds() as i64);
+
+        Self {
+            request_id,
+            epoch_root,
+            epoch_sequence,
+            priority,
+            budget_type,
+            requester,
+            trigger_batch_type,
+            is_high_risk,
+            created_at,
+            deadline,
+            status: AnchorRequestStatus::Pending,
+        }
+    }
+
+    /// Check if deadline has passed
+    pub fn is_overdue(&self) -> bool {
+        chrono::Utc::now() > self.deadline
+    }
+
+    /// Escalate priority if deadline is approaching
+    pub fn escalate_if_needed(&mut self) {
+        if self.is_overdue() && self.priority != AnchorPriority::Must {
+            // Escalate to MUST if deadline passed
+            self.priority = AnchorPriority::Must;
+            self.budget_type = AnchorBudgetType::PublicOnly;
+        }
+    }
+}
+
+/// Anchor request status
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnchorRequestStatus {
+    /// Request pending
+    Pending,
+    /// Anchoring in progress
+    InProgress,
+    /// Anchor completed
+    Completed,
+    /// Request cancelled
+    Cancelled,
+    /// Request failed
+    Failed,
+}
+
+/// Anchor cost calculation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnchorCost {
+    /// Estimated chain fee
+    pub chain_fee: String,
+    /// Public budget allocation
+    pub public_allocation: String,
+    /// Actor/Node contribution (if any)
+    pub self_fund_amount: Option<String>,
+    /// Fee currency
+    pub currency: String,
+    /// Chain type
+    pub chain_type: AnchorChainType,
+}
+
+impl AnchorCost {
+    /// Calculate cost for a given priority and chain
+    pub fn estimate(priority: AnchorPriority, chain_type: AnchorChainType) -> Self {
+        // Placeholder estimation - actual values would come from fee oracle
+        let chain_fee = match chain_type {
+            AnchorChainType::Bitcoin | AnchorChainType::Atomicals => "0.0001 BTC",
+            AnchorChainType::Ethereum => "0.001 ETH",
+            AnchorChainType::Polygon => "0.1 MATIC",
+            AnchorChainType::Solana => "0.001 SOL",
+            AnchorChainType::Internal => "0",
+        };
+
+        let (public, self_fund) = match priority.budget_type() {
+            AnchorBudgetType::PublicOnly => (chain_fee, None),
+            AnchorBudgetType::PublicWithOptional => (chain_fee, Some("0")),
+            AnchorBudgetType::SelfFundedOnly => ("0", Some(chain_fee)),
+        };
+
+        Self {
+            chain_fee: chain_fee.to_string(),
+            public_allocation: public.to_string(),
+            self_fund_amount: self_fund.map(String::from),
+            currency: match chain_type {
+                AnchorChainType::Bitcoin | AnchorChainType::Atomicals => "BTC",
+                AnchorChainType::Ethereum => "ETH",
+                AnchorChainType::Polygon => "MATIC",
+                AnchorChainType::Solana => "SOL",
+                AnchorChainType::Internal => "NONE",
+            }.to_string(),
+            chain_type,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

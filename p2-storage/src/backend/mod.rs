@@ -13,6 +13,7 @@ pub mod ipfs_cluster;
 // S3 backend modules
 pub mod s3;
 pub mod s3_lifecycle;
+pub mod s3_replication;
 
 pub use local::LocalStorageBackend;
 pub use traits::{
@@ -30,4 +31,10 @@ pub use s3::{S3Backend, S3Config, S3StorageClass, ServerSideEncryption, S3Object
 pub use s3_lifecycle::{
     LifecycleConfiguration, LifecycleManager, LifecycleRule, LifecycleTransition,
     LifecycleExpiration, LifecycleFilter, LifecycleRuleStatus,
+};
+pub use s3_replication::{
+    CrossRegionReplicationConfig, CrossRegionReplicator, ReplicationEndpoint,
+    ReplicationRule, ReplicationRuleStatus, ReplicationFilter, ReplicationDestination,
+    ReplicationTimeControl, ReplicationRecord, ObjectReplicationStatus,
+    ReplicationStats, ReplicationBatchResult, ReplicationVerification,
 };

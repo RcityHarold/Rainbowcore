@@ -7,10 +7,12 @@
 //! - Access tickets (ticketed forensic access)
 //! - Selectors (minimal disclosure)
 //! - Audit artifacts (mandatory audit logging)
+//! - Payload map commits (P1-P2 mapping commitment system)
 
 pub mod access_ticket;
 pub mod audit_artifacts;
 pub mod evidence_bundle;
+pub mod payload_map;
 pub mod resurrection;
 pub mod sealed_payload;
 pub mod selector;
@@ -40,3 +42,8 @@ pub use sealed_payload::{
     ThresholdEncryptionInfo,
 };
 pub use selector::{PayloadSelector, SelectorType, SelectorValidation};
+pub use payload_map::{
+    ACMapCommit, BatchMapCommit, MapCommit, MapCommitStatus, MapCommitVerifyResult,
+    MapCommitVersionInfo, PayloadMap, PayloadMapEntry, PayloadMapEntryStatus,
+    SnapshotMapCommit, SnapshotType,
+};

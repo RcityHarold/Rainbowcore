@@ -1,6 +1,19 @@
 //! S3-Compatible Storage Backend
 //!
 //! Object storage backend supporting AWS S3, MinIO, and other S3-compatible services.
+//!
+//! # Important Security Note
+//!
+//! This implementation uses a simplified HTTP client without AWS Signature v4 signing.
+//! It works well with:
+//! - MinIO (with access key/secret in URL or environment)
+//! - LocalStack
+//! - Other S3-compatible services that support simple authentication
+//!
+//! For production AWS S3 usage with proper IAM authentication, consider:
+//! 1. Using the `aws-sdk-s3` crate directly
+//! 2. Running behind a proxy that handles signing
+//! 3. Using pre-signed URLs
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -262,7 +275,12 @@ impl S3Backend {
         }
     }
 
-    /// Put object to S3 (simplified - real impl would use AWS SDK)
+    /// Put object to S3-compatible storage
+    ///
+    /// # Note
+    /// This uses a simplified HTTP PUT without AWS Signature v4 signing.
+    /// Works with MinIO, LocalStack, and services that support basic auth.
+    /// For AWS S3 with IAM, use `aws-sdk-s3` or pre-signed URLs.
     async fn put_object(
         &self,
         key: &str,
@@ -272,8 +290,9 @@ impl S3Backend {
     ) -> StorageResult<S3ObjectMeta> {
         let url = self.build_url(key);
 
-        // In production, use aws-sdk-s3 for proper signing
-        // This is a simplified placeholder
+        // Note: This is a simplified implementation suitable for MinIO/LocalStack.
+        // For AWS S3 with proper IAM authentication, use aws-sdk-s3 or implement
+        // AWS Signature v4 signing.
         let mut request = self.client.put(&url).body(data.to_vec());
 
         request = request.header("Content-Type", content_type);

@@ -4,7 +4,7 @@
 
 use axum::{
     extract::{ConnectInfo, Request, State},
-    http::StatusCode,
+    http::{HeaderValue, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
     Json,
@@ -16,6 +16,20 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 use crate::error::ErrorResponse;
+
+/// Create a HeaderValue from a number (infallible for valid numbers)
+fn header_value_from_u32(value: u32) -> HeaderValue {
+    // Converting u32 to string always produces valid ASCII, so this is safe
+    HeaderValue::from_str(&value.to_string())
+        .expect("u32 string representation is always valid ASCII")
+}
+
+/// Create a HeaderValue from u64 (infallible for valid numbers)
+fn header_value_from_u64(value: u64) -> HeaderValue {
+    // Converting u64 to string always produces valid ASCII, so this is safe
+    HeaderValue::from_str(&value.to_string())
+        .expect("u64 string representation is always valid ASCII")
+}
 
 /// Rate limit configuration
 #[derive(Debug, Clone)]
@@ -230,18 +244,9 @@ impl IntoResponse for RateLimitError {
 
         // Add rate limit headers
         let headers = response.headers_mut();
-        headers.insert(
-            "X-RateLimit-Limit",
-            self.limit.to_string().parse().unwrap(),
-        );
-        headers.insert(
-            "X-RateLimit-Remaining",
-            self.remaining.to_string().parse().unwrap(),
-        );
-        headers.insert(
-            "Retry-After",
-            self.retry_after.as_secs().to_string().parse().unwrap(),
-        );
+        headers.insert("X-RateLimit-Limit", header_value_from_u32(self.limit));
+        headers.insert("X-RateLimit-Remaining", header_value_from_u32(self.remaining));
+        headers.insert("Retry-After", header_value_from_u64(self.retry_after.as_secs()));
 
         response
     }
@@ -302,14 +307,8 @@ pub async fn rate_limit(
     // Add rate limit headers to response
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
-    headers.insert(
-        "X-RateLimit-Limit",
-        limiter.config.max_requests.to_string().parse().unwrap(),
-    );
-    headers.insert(
-        "X-RateLimit-Remaining",
-        remaining.to_string().parse().unwrap(),
-    );
+    headers.insert("X-RateLimit-Limit", header_value_from_u32(limiter.config.max_requests));
+    headers.insert("X-RateLimit-Remaining", header_value_from_u32(remaining));
 
     Ok(response)
 }

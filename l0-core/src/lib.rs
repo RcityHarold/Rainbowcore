@@ -16,11 +16,13 @@
 //!
 //! L0 特有的类型和接口定义在本 crate 中。
 
-pub mod types;
-pub mod ledger;
 pub mod canon;
+pub mod constants;
 pub mod crypto;
 pub mod error;
+pub mod ledger;
+pub mod logging;
+pub mod types;
 pub mod version;
 
 // Re-export soul-base primitives for convenience
@@ -30,5 +32,6 @@ pub use soulbase_types::envelope::Envelope;
 pub use soulbase_types::id::Id;
 pub use soulbase_types::subject::Subject;
 
-pub use types::*;
+pub use constants::*;
 pub use error::*;
+pub use types::*;
