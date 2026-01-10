@@ -9,8 +9,17 @@ use axum::{
     Json,
 };
 use chrono::{DateTime, Utc};
+use l0_core::types::{ActorId, Digest};
+use p2_core::ledger::SnapshotLedger;
+use p2_core::types::{
+    ContinuitySkeleton, ContinuityState, GovernanceStateSkeleton, MapCommitRef,
+    MinimalRelationshipSkeleton, R0Trigger, SkeletonManifest, SkeletonSnapshot, SubjectProof,
+};
 use serde::{Deserialize, Serialize};
 use tracing::info;
+
+use bridge::L0CommitClient;
+use l0_core::types::ReceiptId;
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -30,23 +39,20 @@ pub struct CreateR0Request {
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum R0TriggerType {
-    /// Subject onset event
+    /// Subject onset event (MUST)
     SubjectOnset,
-    /// Scheduled backup
-    Scheduled,
-    /// Manual trigger
-    Manual,
-    /// Pre-migration checkpoint
-    PreMigration,
+    /// Custody freeze trigger (MUST)
+    CustodyFreeze,
+    /// Governance state batch trigger (SHOULD)
+    GovernanceBatch,
 }
 
 impl std::fmt::Display for R0TriggerType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             R0TriggerType::SubjectOnset => write!(f, "subject_onset"),
-            R0TriggerType::Scheduled => write!(f, "scheduled"),
-            R0TriggerType::Manual => write!(f, "manual"),
-            R0TriggerType::PreMigration => write!(f, "pre_migration"),
+            R0TriggerType::CustodyFreeze => write!(f, "custody_freeze"),
+            R0TriggerType::GovernanceBatch => write!(f, "governance_batch"),
         }
     }
 }
@@ -162,8 +168,18 @@ pub struct VerifySnapshotResponse {
 /// Create an R0 (skeleton) snapshot
 ///
 /// POST /api/v1/snapshots/r0
+///
+/// # Implementation Notes
+///
+/// This creates a minimal R0 skeleton snapshot. In production, this should:
+/// 1. Load actual actor state from the primary ledger
+/// 2. Collect payload refs from storage
+/// 3. Generate proper MapCommitRef
+/// 4. Submit SnapshotMapCommit to L0
+///
+/// Current implementation creates a basic valid snapshot for testing/demo.
 pub async fn create_r0_snapshot(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(request): Json<CreateR0Request>,
 ) -> Result<impl IntoResponse, ApiError> {
     info!(
@@ -177,16 +193,139 @@ pub async fn create_r0_snapshot(
         return Err(ApiError::BadRequest("actor_id is required".to_string()));
     }
 
-    // In a real implementation, this would:
-    // 1. Load actor state from the ledger
-    // 2. Generate the skeleton snapshot
-    // 3. Store it in the snapshot ledger
-    // For now, we generate a snapshot ID
+    let actor_id = ActorId::new(&request.actor_id);
     let snapshot_id = format!("r0:{}", uuid::Uuid::new_v4());
     let now = Utc::now();
 
-    // Here would be the actual snapshot creation logic using:
-    // state.snapshot_ledger.store_r0(snapshot).await?
+    // Map trigger type
+    let trigger = match request.trigger {
+        R0TriggerType::SubjectOnset => R0Trigger::SubjectOnset,
+        R0TriggerType::CustodyFreeze => R0Trigger::CustodyFreeze,
+        R0TriggerType::GovernanceBatch => R0Trigger::GovernanceBatch,
+    };
+
+    // TODO: In production, collect actual payload refs from storage
+    // For now, create a minimal skeleton snapshot
+    let snapshot = SkeletonSnapshot {
+        snapshot_id: snapshot_id.clone(),
+        package_digest: Digest::blake3(format!("r0-package-{}", snapshot_id).as_bytes()),
+        actor_id: actor_id.clone(),
+        issuer_node_id: "node:system".to_string(),
+        subject_proof: SubjectProof {
+            subject_onset_anchor_ref: format!("anchor:{}", uuid::Uuid::new_v4()),
+            subject_stage: "active".to_string(),
+            stage_digest: Digest::blake3(b"stage-active"),
+        },
+        continuity_skeleton: ContinuitySkeleton {
+            ac_sequence_skeleton_digest: Digest::blake3(b"ac-sequence"),
+            tip_witness_refs_digest: Digest::blake3(b"tip-witnesses"),
+            continuity_state: ContinuityState::Pass,
+        },
+        governance_skeleton: GovernanceStateSkeleton {
+            in_repair: false,
+            active_penalties_digest: None,
+            constraints: vec![],
+            pending_cases_refs: vec![],
+        },
+        relationship_skeleton: MinimalRelationshipSkeleton {
+            org_membership_digest: None,
+            group_membership_digest: None,
+            relationship_structure_digest: Digest::blake3(b"relationships"),
+        },
+        map_commit_ref: MapCommitRef {
+            payload_map_commit_ref: format!("pmc:{}", uuid::Uuid::new_v4()),
+            sealed_payload_refs_digest: Digest::blake3(b"sealed-refs"),
+        },
+        msn_with_approval: None,
+        msn_payload_ref: None,
+        boot_config: None,
+        payload_refs: vec![],
+        payload_refs_digest: Digest::blake3(b"payload-refs"),
+        manifest: SkeletonManifest {
+            version: "v1".to_string(),
+            shards: vec![],
+            generation_reason: format!("{:?}", trigger),
+            coverage_scope: "full".to_string(),
+            missing_payloads: vec![],
+        },
+        trigger,
+        generated_at: now,
+        policy_version: request.policy_version.unwrap_or_else(|| "v1".to_string()),
+        receipt_id: None, // Will be set after L0 submission
+    };
+
+    // Store snapshot in ledger
+    state
+        .snapshot_ledger
+        .store_r0(snapshot.clone())
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to store R0 snapshot: {}", e)))?;
+
+    // Create SnapshotMapCommit for L0 anchoring
+    // Use the payload refs from the snapshot
+    let map_commit = bridge::PayloadMapCommit::from_refs(
+        &snapshot.payload_refs,
+        &actor_id.0,
+        bridge::CommitType::Snapshot,
+    );
+    let map_commit_ref = map_commit.commit_id.clone();
+
+    // Submit to L0 for Receipt (proves P1 anchoring)
+    let receipt_id = match state.l0_client.submit_commit(&map_commit).await {
+        Ok(receipt) => {
+            tracing::info!(
+                snapshot_id = %snapshot_id,
+                receipt_id = %receipt.0,
+                "Snapshot MapCommit anchored to L0 - R0 has P1 accountability"
+            );
+            Some(receipt)
+        }
+        Err(e) => {
+            tracing::warn!(
+                snapshot_id = %snapshot_id,
+                error = %e,
+                "Failed to submit SnapshotMapCommit to L0 - snapshot created but not anchored"
+            );
+            None
+        }
+    };
+
+    // Update snapshot with map_commit_ref
+    if let Err(e) = state
+        .snapshot_ledger
+        .set_snapshot_map_commit(&snapshot_id, map_commit_ref.clone())
+        .await
+    {
+        tracing::warn!(
+            snapshot_id = %snapshot_id,
+            error = %e,
+            "Failed to update snapshot with map_commit_ref"
+        );
+    }
+
+    // Update snapshot with receipt_id if we got one
+    if let Some(ref receipt_id) = receipt_id {
+        if let Err(e) = state
+            .snapshot_ledger
+            .set_snapshot_receipt(&snapshot_id, receipt_id.clone())
+            .await
+        {
+            tracing::warn!(
+                snapshot_id = %snapshot_id,
+                error = %e,
+                "Failed to update snapshot with receipt_id"
+            );
+        }
+    }
+
+    let anchored = receipt_id.is_some();
+
+    info!(
+        snapshot_id = %snapshot_id,
+        actor_id = %request.actor_id,
+        anchored = anchored,
+        "R0 snapshot created successfully"
+    );
 
     let response = CreateSnapshotResponse {
         snapshot_id,
@@ -322,19 +461,32 @@ pub async fn list_snapshots(
 ///
 /// GET /api/v1/snapshots/r0/latest/:actor_id
 pub async fn get_latest_r0(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Path(actor_id): Path<String>,
 ) -> Result<Json<R0SnapshotSummary>, ApiError> {
     info!(actor_id = %actor_id, "Getting latest R0 snapshot");
 
-    // In a real implementation:
-    // let actor = ActorId::new(&actor_id);
-    // let snapshot = state.snapshot_ledger.get_latest_r0(&actor).await?;
+    let actor = ActorId::new(&actor_id);
+    let snapshot = state
+        .snapshot_ledger
+        .get_latest_r0(&actor)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to query snapshot: {}", e)))?
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("No R0 snapshot found for actor: {}", actor_id))
+        })?;
 
-    Err(ApiError::NotFound(format!(
-        "No R0 snapshot found for actor: {}",
-        actor_id
-    )))
+    let summary = R0SnapshotSummary {
+        snapshot_id: snapshot.snapshot_id,
+        actor_id: snapshot.actor_id.0,
+        package_digest: snapshot.package_digest.to_hex(),
+        trigger: format!("{:?}", snapshot.trigger),
+        generated_at: snapshot.generated_at,
+        policy_version: snapshot.policy_version,
+        payload_count: snapshot.payload_refs.len(),
+    };
+
+    Ok(Json(summary))
 }
 
 /// Get latest R1 snapshot for an actor
@@ -356,20 +508,35 @@ pub async fn get_latest_r1(
 ///
 /// POST /api/v1/snapshots/:snapshot_id/verify
 pub async fn verify_snapshot(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Path(snapshot_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     info!(snapshot_id = %snapshot_id, "Verifying snapshot");
 
-    // In a real implementation:
-    // let valid = state.snapshot_ledger.verify_snapshot(&snapshot_id).await?;
+    let valid = state
+        .snapshot_ledger
+        .verify_snapshot(&snapshot_id)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to verify snapshot: {}", e)))?;
+
+    let snapshot_type = if snapshot_id.starts_with("r0:") {
+        Some("r0".to_string())
+    } else if snapshot_id.starts_with("r1:") {
+        Some("r1".to_string())
+    } else {
+        None
+    };
 
     let response = VerifySnapshotResponse {
         snapshot_id,
-        valid: false, // Would be real verification result
-        snapshot_type: None,
+        valid,
+        snapshot_type,
         verified_at: Utc::now(),
-        errors: vec!["Snapshot not found".to_string()],
+        errors: if valid {
+            vec![]
+        } else {
+            vec!["Verification failed or snapshot not found".to_string()]
+        },
     };
 
     Ok(Json(response))

@@ -44,6 +44,15 @@ pub trait L0CommitClient: Send + Sync {
 
     /// Get the current batch sequence number
     async fn current_batch_sequence(&self) -> L0ClientResult<u64>;
+
+    /// Get map commits by batch sequence
+    ///
+    /// Returns a map of commit_id -> PayloadMapCommit for all commits in the batch.
+    /// This is used for backfill operations to find existing commitments.
+    async fn get_map_commits_by_batch(
+        &self,
+        batch_sequence: u64,
+    ) -> L0ClientResult<std::collections::HashMap<String, PayloadMapCommit>>;
 }
 
 /// L0 health status
@@ -404,6 +413,35 @@ impl L0CommitClient for HttpL0Client {
 
         Ok(info.sequence)
     }
+
+    async fn get_map_commits_by_batch(
+        &self,
+        batch_sequence: u64,
+    ) -> L0ClientResult<std::collections::HashMap<String, PayloadMapCommit>> {
+        let url = format!("{}/api/v1/batches/{}/map_commits", self.base_url, batch_sequence);
+
+        let response = self
+            .client
+            .get(&url)
+            .timeout(self.timeout)
+            .send()
+            .await
+            .map_err(|e| BridgeError::L0Unavailable(format!("HTTP request failed: {}", e)))?;
+
+        if !response.status().is_success() {
+            return Err(BridgeError::L0Unavailable(format!(
+                "Failed to get map commits for batch {}",
+                batch_sequence
+            )));
+        }
+
+        let commits: std::collections::HashMap<String, PayloadMapCommit> = response
+            .json()
+            .await
+            .map_err(|e| BridgeError::L0Unavailable(format!("Failed to parse: {}", e)))?;
+
+        Ok(commits)
+    }
 }
 
 // ============================================================================
@@ -530,6 +568,18 @@ where
         Ok(self
             .batch_sequence
             .load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    async fn get_map_commits_by_batch(
+        &self,
+        _batch_sequence: u64,
+    ) -> L0ClientResult<std::collections::HashMap<String, PayloadMapCommit>> {
+        // TODO: Implement database query to retrieve map_commits by batch
+        // For now, return empty map as Direct client doesn't have full map_commit storage yet
+        tracing::warn!(
+            "DirectL0Client.get_map_commits_by_batch not fully implemented - returning empty"
+        );
+        Ok(std::collections::HashMap::new())
     }
 }
 
@@ -677,6 +727,19 @@ impl L0CommitClient for MockL0Client {
         Ok(self
             .batch_sequence
             .load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    async fn get_map_commits_by_batch(
+        &self,
+        _batch_sequence: u64,
+    ) -> L0ClientResult<std::collections::HashMap<String, PayloadMapCommit>> {
+        if self.fail_mode.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(BridgeError::L0Unavailable("Mock failure mode".to_string()));
+        }
+
+        // Mock implementation - return empty map
+        // In a real test, this would be populated with test data
+        Ok(std::collections::HashMap::new())
     }
 }
 

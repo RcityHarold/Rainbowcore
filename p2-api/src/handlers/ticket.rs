@@ -71,13 +71,47 @@ pub async fn create_ticket(
         return Err(ApiError::validation("No valid permissions specified"));
     }
 
+    // Parse selector - default to DigestOnly (most restrictive)
+    let selector = match &request.selector {
+        None => {
+            tracing::info!("No selector specified, defaulting to DigestOnly (minimal disclosure)");
+            PayloadSelector::digest_only()
+        }
+        Some(crate::dto::SelectorConfig::Full) => {
+            tracing::warn!("Full selector requested - maximum disclosure!");
+            PayloadSelector::full()
+        }
+        Some(crate::dto::SelectorConfig::Span { start, end }) => {
+            PayloadSelector::span(*start, *end)
+        }
+        Some(crate::dto::SelectorConfig::ByteRange { start_byte, end_byte }) => {
+            PayloadSelector::byte_range(*start_byte, *end_byte)
+        }
+        Some(crate::dto::SelectorConfig::Fields { field_paths }) => {
+            let paths: Vec<&str> = field_paths.iter().map(|s| s.as_str()).collect();
+            PayloadSelector::fields(paths)
+        }
+        Some(crate::dto::SelectorConfig::DigestOnly) => {
+            PayloadSelector::digest_only()
+        }
+        Some(crate::dto::SelectorConfig::Redacted { redaction_policy }) => {
+            PayloadSelector::redacted(redaction_policy)
+        }
+    };
+
+    tracing::info!(
+        selector_type = ?selector.selector_type,
+        disclosure_level = selector.disclosure_level(),
+        "Ticket selector configured"
+    );
+
     // Create ticket request
     let ticket_request = TicketRequest {
         consent_ref: format!("consent:{}", uuid::Uuid::new_v4()),
         holder: ActorId::new(&request.holder_id),
         target_resource_ref: request.ref_ids.join(","),
         permissions,
-        selector: PayloadSelector::full(),
+        selector,
         validity_seconds: request.validity_seconds,
         purpose: request.purpose.clone(),
         one_time: false,

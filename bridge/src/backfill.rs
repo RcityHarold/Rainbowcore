@@ -3,15 +3,32 @@
 //! Upgrades B-level evidence to A-level when P1 receipts and map_commits
 //! become available. This ensures eventual consistency between P1 and P2.
 //!
-//! # Hard Rule
+//! # Hard Rules
 //!
 //! Evidence level MUST be upgraded from B to A when:
 //! 1. A valid P1 receipt exists
 //! 2. A valid payload_map_commit exists
 //! 3. The map_commit digest matches the payload refs digest
+//!
+//! # Anti-History-Washing (防洗史) Rules
+//!
+//! **CRITICAL**: The order of commit vs upload determines upgrade eligibility:
+//!
+//! - **Commit-Then-Upload**: P1 commitment exists BEFORE P2 upload
+//!   - This is a valid backfill scenario
+//!   - Evidence CAN be upgraded from B to A
+//!   - The commitment proves intent existed before content was stored
+//!
+//! - **Upload-Then-Commit**: P2 upload happened BEFORE P1 commitment
+//!   - This is NOT a valid backfill for A-level
+//!   - Evidence remains at B-level (storage only, not evidence-grade)
+//!   - Marked as `history_wash_risk: true`
+//!   - This prevents backdating evidence after the fact
+//!
+//! The `commit_cutoff_time` is used to determine which case applies.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use l0_core::types::{Digest, ReceiptId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -22,7 +39,46 @@ use tracing::{debug, info, warn};
 use crate::error::{BridgeError, BridgeResult};
 use crate::l0_client::L0CommitClient;
 use crate::payload_map_commit::PayloadMapCommit;
-use p2_core::types::{EvidenceBundle, EvidenceLevel};
+use l0_core::types::EvidenceLevel;
+use p2_core::types::EvidenceBundle;
+
+/// Upload-Commit order for anti-history-washing verification
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UploadCommitOrder {
+    /// Commit was made BEFORE upload - valid for A-level upgrade
+    CommitThenUpload,
+    /// Upload was made BEFORE commit - NOT valid for A-level (storage only)
+    UploadThenCommit,
+    /// Order cannot be determined (missing timestamps)
+    Undetermined,
+}
+
+impl UploadCommitOrder {
+    /// Check if this order allows A-level upgrade
+    pub fn allows_a_level_upgrade(&self) -> bool {
+        matches!(self, Self::CommitThenUpload)
+    }
+
+    /// Determine order from timestamps
+    pub fn from_timestamps(
+        commit_time: Option<DateTime<Utc>>,
+        upload_time: Option<DateTime<Utc>>,
+        grace_window: Duration,
+    ) -> Self {
+        match (commit_time, upload_time) {
+            (Some(commit), Some(upload)) => {
+                // Allow grace window for near-simultaneous operations
+                if commit <= upload + grace_window {
+                    Self::CommitThenUpload
+                } else {
+                    Self::UploadThenCommit
+                }
+            }
+            _ => Self::Undetermined,
+        }
+    }
+}
 
 /// Backfill ledger trait for tracking pending evidence upgrades
 #[async_trait]
@@ -58,6 +114,10 @@ pub struct BackfillEntry {
     pub last_attempt_at: Option<DateTime<Utc>>,
     /// Status
     pub status: BackfillStatus,
+    /// P2 upload timestamp (for anti-history-washing verification)
+    pub p2_upload_time: Option<DateTime<Utc>>,
+    /// Commit cutoff time - commitments after this time are Upload-Then-Commit
+    pub commit_cutoff_time: Option<DateTime<Utc>>,
 }
 
 /// Backfill status
@@ -91,6 +151,39 @@ pub struct BackfillResult {
     pub error: Option<String>,
     /// Completed at
     pub completed_at: DateTime<Utc>,
+    /// Upload-Commit order determination
+    pub upload_commit_order: UploadCommitOrder,
+    /// History wash risk flag
+    /// True if Upload-Then-Commit pattern detected (cannot upgrade to A-level)
+    pub history_wash_risk: bool,
+    /// Commit timestamp from P1 (if found)
+    pub commit_time: Option<DateTime<Utc>>,
+    /// Reason for not upgrading (if applicable)
+    pub no_upgrade_reason: Option<BackfillNoUpgradeReason>,
+}
+
+/// Reason why backfill did not upgrade to A-level
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackfillNoUpgradeReason {
+    /// Missing P1 receipt
+    MissingReceipt,
+    /// Missing payload_map_commit
+    MissingMapCommit,
+    /// Upload-Then-Commit pattern detected (防洗史 violation)
+    UploadThenCommit {
+        upload_time: DateTime<Utc>,
+        commit_time: DateTime<Utc>,
+    },
+    /// Digest mismatch between P1 commit and P2 payloads
+    DigestMismatch {
+        expected: String,
+        actual: String,
+    },
+    /// Commit time unknown (cannot verify order)
+    CommitTimeUnknown,
+    /// Other error
+    Other { details: String },
 }
 
 /// Backfill statistics
@@ -120,6 +213,10 @@ pub struct BackfillExecutor<L: L0CommitClient, B: BackfillLedger> {
     max_retries: u32,
     /// Batch size for processing
     batch_size: usize,
+    /// Grace window for commit-upload timing (for network latency etc.)
+    grace_window: Duration,
+    /// Number of batches to search for receipts
+    receipt_search_batches: u64,
 }
 
 /// Evidence updater trait (abstracts EvidenceLedger for this module)
@@ -131,6 +228,21 @@ pub trait EvidenceUpdater: Send + Sync {
     async fn set_receipt(&self, bundle_id: &str, receipt_id: ReceiptId) -> BridgeResult<()>;
     /// Set map commit on bundle
     async fn set_map_commit(&self, bundle_id: &str, map_commit_ref: String) -> BridgeResult<()>;
+    /// Set history wash risk flag on bundle
+    async fn set_history_wash_risk(&self, bundle_id: &str, risk: bool, reason: Option<String>) -> BridgeResult<()>;
+}
+
+/// Found map commit with metadata
+#[derive(Debug, Clone)]
+pub struct FoundMapCommit {
+    /// Map commit reference ID
+    pub ref_id: String,
+    /// Map commit digest
+    pub digest: Digest,
+    /// Commit timestamp from L0
+    pub commit_time: DateTime<Utc>,
+    /// The actual PayloadMapCommit (if available)
+    pub commit: Option<PayloadMapCommit>,
 }
 
 impl<L: L0CommitClient, B: BackfillLedger> BackfillExecutor<L, B> {
@@ -146,6 +258,10 @@ impl<L: L0CommitClient, B: BackfillLedger> BackfillExecutor<L, B> {
             evidence_updater,
             max_retries: 5,
             batch_size: 100,
+            // Default 5 minute grace window for commit-upload timing
+            grace_window: Duration::minutes(5),
+            // Search last 100 batches for receipts
+            receipt_search_batches: 100,
         }
     }
 
@@ -158,6 +274,18 @@ impl<L: L0CommitClient, B: BackfillLedger> BackfillExecutor<L, B> {
     /// Set batch size
     pub fn with_batch_size(mut self, size: usize) -> Self {
         self.batch_size = size;
+        self
+    }
+
+    /// Set grace window for commit-upload timing
+    pub fn with_grace_window(mut self, window: Duration) -> Self {
+        self.grace_window = window;
+        self
+    }
+
+    /// Set receipt search batch count
+    pub fn with_receipt_search_batches(mut self, count: u64) -> Self {
+        self.receipt_search_batches = count;
         self
     }
 
@@ -186,6 +314,12 @@ impl<L: L0CommitClient, B: BackfillLedger> BackfillExecutor<L, B> {
                 map_commit_ref: None,
                 error: Some(e.to_string()),
                 completed_at: Utc::now(),
+                upload_commit_order: UploadCommitOrder::Undetermined,
+                history_wash_risk: false,
+                commit_time: None,
+                no_upgrade_reason: Some(BackfillNoUpgradeReason::Other {
+                    details: e.to_string(),
+                }),
             });
 
             // Mark complete or failed in ledger
@@ -193,6 +327,22 @@ impl<L: L0CommitClient, B: BackfillLedger> BackfillExecutor<L, B> {
                 self.backfill_ledger
                     .mark_complete(&entry.bundle_id, backfill_result.clone())
                     .await?;
+            }
+
+            // If history wash risk detected, mark on bundle
+            if backfill_result.history_wash_risk {
+                let reason = match &backfill_result.no_upgrade_reason {
+                    Some(BackfillNoUpgradeReason::UploadThenCommit { upload_time, commit_time }) => {
+                        Some(format!(
+                            "Upload-Then-Commit detected: upload={}, commit={}",
+                            upload_time, commit_time
+                        ))
+                    }
+                    _ => Some("History wash risk detected".to_string()),
+                };
+                let _ = self.evidence_updater
+                    .set_history_wash_risk(&entry.bundle_id, true, reason)
+                    .await;
             }
 
             results.push((entry.bundle_id.clone(), backfill_result));
@@ -206,7 +356,7 @@ impl<L: L0CommitClient, B: BackfillLedger> BackfillExecutor<L, B> {
         })
     }
 
-    /// Process a single backfill entry
+    /// Process a single backfill entry with anti-history-washing verification
     async fn process_entry(&self, entry: &BackfillEntry) -> BridgeResult<BackfillResult> {
         debug!("Processing backfill for bundle: {}", entry.bundle_id);
 
@@ -226,12 +376,18 @@ impl<L: L0CommitClient, B: BackfillLedger> BackfillExecutor<L, B> {
                 map_commit_ref: bundle.map_commit_ref.clone(),
                 error: None,
                 completed_at: Utc::now(),
+                upload_commit_order: UploadCommitOrder::CommitThenUpload, // Assume valid if already A
+                history_wash_risk: false,
+                commit_time: None,
+                no_upgrade_reason: None,
             });
         }
 
         // Try to find receipt and map_commit
         let mut receipt_id = bundle.receipt_id.clone();
         let mut map_commit_ref = bundle.map_commit_ref.clone();
+        let mut commit_time: Option<DateTime<Utc>> = None;
+        let mut found_map_commit: Option<FoundMapCommit> = None;
 
         // Search for matching receipt if not already present
         if receipt_id.is_none() {
@@ -254,11 +410,13 @@ impl<L: L0CommitClient, B: BackfillLedger> BackfillExecutor<L, B> {
         // Search for matching map_commit if not already present
         if map_commit_ref.is_none() {
             match self.find_map_commit_for_digest(&entry.payload_refs_digest).await {
-                Ok(Some(ref_id)) => {
+                Ok(Some(found)) => {
+                    commit_time = Some(found.commit_time);
                     self.evidence_updater
-                        .set_map_commit(&entry.bundle_id, ref_id.clone())
+                        .set_map_commit(&entry.bundle_id, found.ref_id.clone())
                         .await?;
-                    map_commit_ref = Some(ref_id);
+                    map_commit_ref = Some(found.ref_id.clone());
+                    found_map_commit = Some(found);
                 }
                 Ok(None) => {
                     debug!("No map_commit found for bundle: {}", entry.bundle_id);
@@ -269,12 +427,40 @@ impl<L: L0CommitClient, B: BackfillLedger> BackfillExecutor<L, B> {
             }
         }
 
-        // Determine new level
-        let new_level = if receipt_id.is_some() && map_commit_ref.is_some() {
-            EvidenceLevel::A
+        // ==== ANTI-HISTORY-WASHING VERIFICATION ====
+        //
+        // Determine if this is Commit-Then-Upload or Upload-Then-Commit
+        let upload_time = entry.p2_upload_time;
+        let cutoff_time = entry.commit_cutoff_time;
+
+        let upload_commit_order = if let (Some(commit_t), Some(upload_t)) = (commit_time, upload_time) {
+            UploadCommitOrder::from_timestamps(Some(commit_t), Some(upload_t), self.grace_window)
+        } else if let Some(cutoff) = cutoff_time {
+            // Use cutoff time as proxy for commit time
+            if let Some(upload_t) = upload_time {
+                if cutoff <= upload_t + self.grace_window {
+                    UploadCommitOrder::CommitThenUpload
+                } else {
+                    UploadCommitOrder::UploadThenCommit
+                }
+            } else {
+                UploadCommitOrder::Undetermined
+            }
         } else {
-            EvidenceLevel::B
+            UploadCommitOrder::Undetermined
         };
+
+        // Determine if history wash risk exists
+        let history_wash_risk = matches!(upload_commit_order, UploadCommitOrder::UploadThenCommit);
+
+        // Determine final evidence level with anti-history-washing rules
+        let (new_level, no_upgrade_reason) = self.determine_final_level(
+            receipt_id.is_some(),
+            map_commit_ref.is_some(),
+            upload_commit_order,
+            upload_time,
+            commit_time,
+        );
 
         let success = new_level == EvidenceLevel::A;
 
@@ -284,25 +470,84 @@ impl<L: L0CommitClient, B: BackfillLedger> BackfillExecutor<L, B> {
             receipt_id,
             map_commit_ref,
             error: if !success {
-                Some("Missing receipt or map_commit".to_string())
+                no_upgrade_reason.as_ref().map(|r| format!("{:?}", r))
             } else {
                 None
             },
             completed_at: Utc::now(),
+            upload_commit_order,
+            history_wash_risk,
+            commit_time,
+            no_upgrade_reason,
         })
+    }
+
+    /// Determine final evidence level with anti-history-washing rules
+    fn determine_final_level(
+        &self,
+        has_receipt: bool,
+        has_map_commit: bool,
+        order: UploadCommitOrder,
+        upload_time: Option<DateTime<Utc>>,
+        commit_time: Option<DateTime<Utc>>,
+    ) -> (EvidenceLevel, Option<BackfillNoUpgradeReason>) {
+        // Rule 1: Missing receipt = B level
+        if !has_receipt {
+            return (EvidenceLevel::B, Some(BackfillNoUpgradeReason::MissingReceipt));
+        }
+
+        // Rule 2: Missing map_commit = B level
+        if !has_map_commit {
+            return (EvidenceLevel::B, Some(BackfillNoUpgradeReason::MissingMapCommit));
+        }
+
+        // Rule 3 (CRITICAL): Upload-Then-Commit = B level (防洗史)
+        // Even if receipt and map_commit exist, if the commit was made AFTER
+        // the upload, this is potentially backdating evidence.
+        match order {
+            UploadCommitOrder::UploadThenCommit => {
+                if let (Some(upload_t), Some(commit_t)) = (upload_time, commit_time) {
+                    return (
+                        EvidenceLevel::B,
+                        Some(BackfillNoUpgradeReason::UploadThenCommit {
+                            upload_time: upload_t,
+                            commit_time: commit_t,
+                        }),
+                    );
+                }
+                // Even without exact times, mark as B if order detected
+                return (
+                    EvidenceLevel::B,
+                    Some(BackfillNoUpgradeReason::Other {
+                        details: "Upload-Then-Commit order detected".to_string(),
+                    }),
+                );
+            }
+            UploadCommitOrder::Undetermined => {
+                // If we can't determine the order, we CANNOT upgrade to A
+                // This is a conservative approach to prevent history washing
+                return (
+                    EvidenceLevel::B,
+                    Some(BackfillNoUpgradeReason::CommitTimeUnknown),
+                );
+            }
+            UploadCommitOrder::CommitThenUpload => {
+                // Valid order - can upgrade to A
+            }
+        }
+
+        // All checks passed - upgrade to A
+        (EvidenceLevel::A, None)
     }
 
     /// Find receipt for a given digest
     async fn find_receipt_for_digest(&self, digest: &Digest) -> BridgeResult<Option<ReceiptId>> {
         // Query L0 for receipts matching this digest
-        // This is a simplified implementation - in production, would need
-        // to query L0 API for map_commits containing this digest
-
-        // For now, we check recent batches
         let current_batch = self.l0_client.current_batch_sequence().await?;
 
-        // Check last 10 batches
-        for batch_seq in (current_batch.saturating_sub(10)..=current_batch).rev() {
+        // Check recent batches (configurable)
+        let start_batch = current_batch.saturating_sub(self.receipt_search_batches);
+        for batch_seq in (start_batch..=current_batch).rev() {
             let receipts = self.l0_client.get_receipts_by_batch(batch_seq).await?;
             for receipt in receipts {
                 // Check if receipt's root matches our digest
@@ -315,11 +560,50 @@ impl<L: L0CommitClient, B: BackfillLedger> BackfillExecutor<L, B> {
         Ok(None)
     }
 
-    /// Find map_commit for a given digest
-    async fn find_map_commit_for_digest(&self, digest: &Digest) -> BridgeResult<Option<String>> {
-        // In production, would query L0 for PayloadMapCommits
-        // For now, return None - the actual implementation depends on L0 API
+    /// Find map_commit for a given digest with timestamp information
+    ///
+    /// This method queries L0 for PayloadMapCommits that match the given digest.
+    /// Returns the commit with its timestamp for anti-history-washing verification.
+    async fn find_map_commit_for_digest(&self, digest: &Digest) -> BridgeResult<Option<FoundMapCommit>> {
+        // Query L0 for PayloadMapCommits matching this digest
+        let current_batch = self.l0_client.current_batch_sequence().await?;
+
+        // Search recent batches for map_commits
+        let start_batch = current_batch.saturating_sub(self.receipt_search_batches);
+        for batch_seq in (start_batch..=current_batch).rev() {
+            // Query L0 for map_commits in this batch
+            match self.l0_client.get_map_commits_by_batch(batch_seq).await {
+                Ok(map_commits) => {
+                    for (ref_id, commit_info) in map_commits {
+                        // Check if this commit's digest matches our target
+                        if commit_info.refs_set_digest == *digest {
+                            return Ok(Some(FoundMapCommit {
+                                ref_id,
+                                digest: commit_info.refs_set_digest.clone(),
+                                commit_time: commit_info.committed_at,
+                                commit: Some(commit_info),
+                            }));
+                        }
+                    }
+                }
+                Err(e) => {
+                    debug!("Error fetching map_commits for batch {}: {}", batch_seq, e);
+                    continue;
+                }
+            }
+        }
+
         Ok(None)
+    }
+
+    /// Verify digest match between P1 commit and P2 payloads
+    /// This is used for reconciliation verification
+    pub fn verify_digest_match(
+        &self,
+        map_commit: &PayloadMapCommit,
+        p2_digest: &Digest,
+    ) -> bool {
+        map_commit.refs_set_digest == *p2_digest
     }
 }
 
@@ -368,6 +652,19 @@ impl Default for InMemoryBackfillLedger {
     }
 }
 
+/// Extended backfill ledger trait with timestamp support
+#[async_trait]
+pub trait BackfillLedgerExt: BackfillLedger {
+    /// Add a bundle to the backfill queue with upload timestamp
+    async fn queue_for_backfill_with_timestamps(
+        &self,
+        bundle_id: &str,
+        payload_refs_digest: Digest,
+        p2_upload_time: Option<DateTime<Utc>>,
+        commit_cutoff_time: Option<DateTime<Utc>>,
+    ) -> BridgeResult<()>;
+}
+
 #[async_trait]
 impl BackfillLedger for InMemoryBackfillLedger {
     async fn queue_for_backfill(&self, bundle_id: &str, payload_refs_digest: Digest) -> BridgeResult<()> {
@@ -381,6 +678,8 @@ impl BackfillLedger for InMemoryBackfillLedger {
                 retry_count: 0,
                 last_attempt_at: None,
                 status: BackfillStatus::Pending,
+                p2_upload_time: None,
+                commit_cutoff_time: None,
             },
         );
         Ok(())
@@ -454,6 +753,22 @@ impl BackfillLedger for InMemoryBackfillLedger {
 mod tests {
     use super::*;
 
+    /// Create a complete BackfillResult for testing
+    fn make_backfill_result(success: bool, level: EvidenceLevel) -> BackfillResult {
+        BackfillResult {
+            success,
+            new_level: Some(level),
+            receipt_id: if success { Some(ReceiptId("receipt:001".to_string())) } else { None },
+            map_commit_ref: if success { Some("pmc:001".to_string()) } else { None },
+            error: if !success { Some("Test error".to_string()) } else { None },
+            completed_at: Utc::now(),
+            upload_commit_order: if success { UploadCommitOrder::CommitThenUpload } else { UploadCommitOrder::Undetermined },
+            history_wash_risk: false,
+            commit_time: None,
+            no_upgrade_reason: if !success { Some(BackfillNoUpgradeReason::MissingReceipt) } else { None },
+        }
+    }
+
     #[tokio::test]
     async fn test_in_memory_backfill_ledger() {
         let ledger = InMemoryBackfillLedger::new();
@@ -483,14 +798,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = BackfillResult {
-            success: true,
-            new_level: Some(EvidenceLevel::A),
-            receipt_id: Some(ReceiptId("receipt:001".to_string())),
-            map_commit_ref: Some("pmc:001".to_string()),
-            error: None,
-            completed_at: Utc::now(),
-        };
+        let result = make_backfill_result(true, EvidenceLevel::A);
 
         ledger.mark_complete("bundle:001", result).await.unwrap();
 
@@ -512,14 +820,7 @@ mod tests {
 
         // Complete some
         for i in 0..3 {
-            let result = BackfillResult {
-                success: true,
-                new_level: Some(EvidenceLevel::A),
-                receipt_id: None,
-                map_commit_ref: None,
-                error: None,
-                completed_at: Utc::now(),
-            };
+            let result = make_backfill_result(true, EvidenceLevel::A);
             ledger
                 .mark_complete(&format!("bundle:{}", i), result)
                 .await
@@ -529,5 +830,154 @@ mod tests {
         let stats = ledger.get_stats().await.unwrap();
         assert_eq!(stats.completed_count, 3);
         assert_eq!(stats.pending_count, 2);
+    }
+
+    // ========== Anti-History-Washing Tests (防洗史测试) ==========
+
+    #[test]
+    fn test_upload_commit_order_commit_then_upload() {
+        // Commit at time T, upload at time T+10min
+        let commit_time = Utc::now();
+        let upload_time = commit_time + Duration::minutes(10);
+        let grace = Duration::minutes(5);
+
+        let order = UploadCommitOrder::from_timestamps(
+            Some(commit_time),
+            Some(upload_time),
+            grace,
+        );
+
+        assert_eq!(order, UploadCommitOrder::CommitThenUpload);
+        assert!(order.allows_a_level_upgrade());
+    }
+
+    #[test]
+    fn test_upload_commit_order_upload_then_commit() {
+        // Upload at time T, commit at time T+10min (history washing attempt)
+        let upload_time = Utc::now();
+        let commit_time = upload_time + Duration::minutes(10);
+        let grace = Duration::minutes(5);
+
+        let order = UploadCommitOrder::from_timestamps(
+            Some(commit_time),
+            Some(upload_time),
+            grace,
+        );
+
+        assert_eq!(order, UploadCommitOrder::UploadThenCommit);
+        assert!(!order.allows_a_level_upgrade());
+    }
+
+    #[test]
+    fn test_upload_commit_order_within_grace_window() {
+        // Commit at time T, upload at time T-3min (within 5min grace window)
+        let commit_time = Utc::now();
+        let upload_time = commit_time - Duration::minutes(3);
+        let grace = Duration::minutes(5);
+
+        let order = UploadCommitOrder::from_timestamps(
+            Some(commit_time),
+            Some(upload_time),
+            grace,
+        );
+
+        // Within grace window, should be treated as Commit-Then-Upload
+        assert_eq!(order, UploadCommitOrder::CommitThenUpload);
+    }
+
+    #[test]
+    fn test_upload_commit_order_undetermined() {
+        let grace = Duration::minutes(5);
+
+        // Missing commit time
+        let order1 = UploadCommitOrder::from_timestamps(
+            None,
+            Some(Utc::now()),
+            grace,
+        );
+        assert_eq!(order1, UploadCommitOrder::Undetermined);
+
+        // Missing upload time
+        let order2 = UploadCommitOrder::from_timestamps(
+            Some(Utc::now()),
+            None,
+            grace,
+        );
+        assert_eq!(order2, UploadCommitOrder::Undetermined);
+
+        // Both missing
+        let order3 = UploadCommitOrder::from_timestamps(None, None, grace);
+        assert_eq!(order3, UploadCommitOrder::Undetermined);
+    }
+
+    #[test]
+    fn test_history_wash_risk_detection() {
+        // Create a result with Upload-Then-Commit
+        let upload_time = Utc::now();
+        let commit_time = upload_time + Duration::hours(1);
+
+        let result = BackfillResult {
+            success: false,
+            new_level: Some(EvidenceLevel::B),
+            receipt_id: Some(ReceiptId("receipt:001".to_string())),
+            map_commit_ref: Some("pmc:001".to_string()),
+            error: Some("Upload-Then-Commit detected".to_string()),
+            completed_at: Utc::now(),
+            upload_commit_order: UploadCommitOrder::UploadThenCommit,
+            history_wash_risk: true,
+            commit_time: Some(commit_time),
+            no_upgrade_reason: Some(BackfillNoUpgradeReason::UploadThenCommit {
+                upload_time,
+                commit_time,
+            }),
+        };
+
+        assert!(result.history_wash_risk);
+        assert_eq!(result.new_level, Some(EvidenceLevel::B));
+        assert!(!result.success);
+    }
+
+    #[test]
+    fn test_no_upgrade_reasons() {
+        // Test all no-upgrade reasons
+        let reasons = vec![
+            BackfillNoUpgradeReason::MissingReceipt,
+            BackfillNoUpgradeReason::MissingMapCommit,
+            BackfillNoUpgradeReason::UploadThenCommit {
+                upload_time: Utc::now(),
+                commit_time: Utc::now() + Duration::hours(1),
+            },
+            BackfillNoUpgradeReason::DigestMismatch {
+                expected: "abc123".to_string(),
+                actual: "def456".to_string(),
+            },
+            BackfillNoUpgradeReason::CommitTimeUnknown,
+            BackfillNoUpgradeReason::Other {
+                details: "Test error".to_string(),
+            },
+        ];
+
+        // All reasons should serialize/deserialize correctly
+        for reason in reasons {
+            let json = serde_json::to_string(&reason).unwrap();
+            let _: BackfillNoUpgradeReason = serde_json::from_str(&json).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_backfill_entry_with_timestamps() {
+        let entry = BackfillEntry {
+            bundle_id: "bundle:001".to_string(),
+            payload_refs_digest: Digest::blake3(b"test"),
+            queued_at: Utc::now(),
+            retry_count: 0,
+            last_attempt_at: None,
+            status: BackfillStatus::Pending,
+            p2_upload_time: Some(Utc::now()),
+            commit_cutoff_time: Some(Utc::now() - Duration::minutes(10)),
+        };
+
+        assert!(entry.p2_upload_time.is_some());
+        assert!(entry.commit_cutoff_time.is_some());
     }
 }

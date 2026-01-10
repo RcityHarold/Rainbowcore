@@ -1,7 +1,8 @@
 //! Data Transfer Objects for P2 API
 
 use chrono::{DateTime, Utc};
-use p2_core::types::{EvidenceLevel, SealedPayloadStatus, StorageTemperature};
+use l0_core::types::EvidenceLevel;
+use p2_core::types::{SealedPayloadStatus, StorageTemperature};
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
@@ -168,6 +169,24 @@ pub struct EvidenceBundleResponse {
     pub created_at: DateTime<Utc>,
 }
 
+/// Selector configuration for ticket creation
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SelectorConfig {
+    /// Full payload access (use with caution)
+    Full,
+    /// Span/fragment level access (recommended default)
+    Span { start: usize, end: usize },
+    /// Byte range access
+    ByteRange { start_byte: u64, end_byte: u64 },
+    /// Field-level access for structured payloads
+    Fields { field_paths: Vec<String> },
+    /// Digest-only (most restrictive)
+    DigestOnly,
+    /// Redacted access
+    Redacted { redaction_policy: String },
+}
+
 /// Access ticket request
 #[derive(Debug, Deserialize, Validate)]
 pub struct CreateAccessTicketRequest {
@@ -190,6 +209,13 @@ pub struct CreateAccessTicketRequest {
     /// Purpose
     #[validate(length(min = 1, max = 1024))]
     pub purpose: String,
+
+    /// Payload selector (minimal disclosure)
+    ///
+    /// Defaults to DigestOnly if not specified (most restrictive).
+    /// Use Span for fragment-level access (recommended balance).
+    /// Use Full only when absolutely necessary.
+    pub selector: Option<SelectorConfig>,
 }
 
 /// Access ticket response

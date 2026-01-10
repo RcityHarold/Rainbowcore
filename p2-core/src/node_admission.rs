@@ -11,6 +11,20 @@
 //! 4. **Health Monitoring**: Continuous monitoring for node health
 //! 5. **Eviction**: Misbehaving nodes are removed from the network
 //!
+//! # Connected Node Hard Requirements (硬门槛)
+//!
+//! Per DSN documentation Chapter 2, Connected Nodes MUST meet two requirements:
+//!
+//! 1. **P1 Connection**: Node must be connected to P1 (L0) receipt chain
+//! 2. **R0 Skeleton Package**: Node must have a valid R0 skeleton package
+//!    - R0 contains minimal state required for life resurrection
+//!    - Verified via SnapshotMapCommit or payload_map_commit reconciliation
+//!
+//! **HARD RULE**: Nodes lacking R0 are "local-only" - they cannot:
+//! - Participate in cross-node reconciliation
+//! - Be recognized by other connected nodes
+//! - Share or receive payload mappings
+//!
 //! # Node Types
 //!
 //! - **Storage Node**: Stores encrypted payloads
@@ -63,6 +77,28 @@ pub enum AdmissionError {
 
     #[error("Rate limit exceeded: {node_id}")]
     RateLimitExceeded { node_id: String },
+
+    // ==== R0 Skeleton Package Errors (HARD REQUIREMENTS) ====
+
+    /// Node lacks R0 skeleton package - HARD REQUIREMENT VIOLATION
+    #[error("Missing R0 skeleton package (node is local-only): {node_id}")]
+    MissingR0Skeleton { node_id: String },
+
+    /// R0 skeleton package verification failed
+    #[error("R0 skeleton verification failed: {reason}")]
+    R0VerificationFailed { reason: String },
+
+    /// P1 connection not established - HARD REQUIREMENT VIOLATION
+    #[error("P1 connection not established (node is local-only): {node_id}")]
+    MissingP1Connection { node_id: String },
+
+    /// SnapshotMapCommit reconciliation failed
+    #[error("SnapshotMapCommit reconciliation failed: {reason}")]
+    SnapshotReconciliationFailed { reason: String },
+
+    /// Node is local-only (lacks required connections)
+    #[error("Node is local-only and cannot participate in cross-node operations: {node_id}")]
+    LocalOnlyNode { node_id: String },
 }
 
 pub type AdmissionResult<T> = Result<T, AdmissionError>;
@@ -122,6 +158,139 @@ pub enum RegistrationStatus {
     Departed,
 }
 
+/// R0 Skeleton Package Status
+///
+/// Tracks the status of the node's R0 skeleton package.
+/// R0 is REQUIRED for connected node status (not local-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct R0SkeletonStatus {
+    /// R0 skeleton package exists
+    pub has_r0: bool,
+    /// R0 skeleton digest (for verification)
+    pub r0_digest: Option<Digest>,
+    /// R0 creation timestamp
+    pub created_at: Option<DateTime<Utc>>,
+    /// R0 last verified timestamp
+    pub last_verified_at: Option<DateTime<Utc>>,
+    /// R0 verification result
+    pub verified: bool,
+    /// R0 verification error (if any)
+    pub verification_error: Option<String>,
+    /// Associated SnapshotMapCommit reference
+    pub snapshot_map_commit_ref: Option<String>,
+}
+
+impl Default for R0SkeletonStatus {
+    fn default() -> Self {
+        Self {
+            has_r0: false,
+            r0_digest: None,
+            created_at: None,
+            last_verified_at: None,
+            verified: false,
+            verification_error: None,
+            snapshot_map_commit_ref: None,
+        }
+    }
+}
+
+impl R0SkeletonStatus {
+    /// Check if R0 is valid and verified
+    pub fn is_valid(&self) -> bool {
+        self.has_r0 && self.verified && self.r0_digest.is_some()
+    }
+
+    /// Create a verified R0 status
+    pub fn verified_with_digest(digest: Digest, snapshot_ref: String) -> Self {
+        Self {
+            has_r0: true,
+            r0_digest: Some(digest),
+            created_at: Some(Utc::now()),
+            last_verified_at: Some(Utc::now()),
+            verified: true,
+            verification_error: None,
+            snapshot_map_commit_ref: Some(snapshot_ref),
+        }
+    }
+
+    /// Mark verification failed
+    pub fn mark_verification_failed(&mut self, reason: &str) {
+        self.verified = false;
+        self.verification_error = Some(reason.to_string());
+        self.last_verified_at = Some(Utc::now());
+    }
+}
+
+/// P1 (L0) Connection Status
+///
+/// Tracks the node's connection to the P1/L0 receipt chain.
+/// P1 connection is REQUIRED for connected node status (not local-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct P1ConnectionStatus {
+    /// P1 connection established
+    pub connected: bool,
+    /// P1 node endpoint
+    pub endpoint: Option<String>,
+    /// Last successful receipt sync
+    pub last_sync_at: Option<DateTime<Utc>>,
+    /// Last receipt ID received
+    pub last_receipt_id: Option<String>,
+    /// Connection health
+    pub healthy: bool,
+    /// Connection error (if any)
+    pub error: Option<String>,
+}
+
+impl Default for P1ConnectionStatus {
+    fn default() -> Self {
+        Self {
+            connected: false,
+            endpoint: None,
+            last_sync_at: None,
+            last_receipt_id: None,
+            healthy: false,
+            error: None,
+        }
+    }
+}
+
+impl P1ConnectionStatus {
+    /// Check if P1 connection is valid
+    pub fn is_valid(&self) -> bool {
+        self.connected && self.healthy
+    }
+
+    /// Create a connected status
+    pub fn connected_to(endpoint: &str) -> Self {
+        Self {
+            connected: true,
+            endpoint: Some(endpoint.to_string()),
+            last_sync_at: Some(Utc::now()),
+            last_receipt_id: None,
+            healthy: true,
+            error: None,
+        }
+    }
+
+    /// Mark connection failed
+    pub fn mark_disconnected(&mut self, reason: &str) {
+        self.connected = false;
+        self.healthy = false;
+        self.error = Some(reason.to_string());
+    }
+}
+
+/// Node connectivity classification
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NodeConnectivity {
+    /// Fully connected: has P1 + R0 - can participate in all operations
+    FullyConnected,
+    /// Local-only: missing P1 or R0 - cannot participate in cross-node operations
+    LocalOnly,
+    /// Degraded: has connections but they are unhealthy
+    Degraded,
+}
+
 /// Connected node information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectedNode {
@@ -147,6 +316,13 @@ pub struct ConnectedNode {
     pub capabilities: NodeCapabilities,
     /// Metadata
     pub metadata: HashMap<String, String>,
+
+    // ==== Hard Requirements for Connected Node Status ====
+
+    /// R0 Skeleton Package status (REQUIRED for connected status)
+    pub r0_status: R0SkeletonStatus,
+    /// P1 (L0) Connection status (REQUIRED for connected status)
+    pub p1_status: P1ConnectionStatus,
 }
 
 impl ConnectedNode {
@@ -170,6 +346,8 @@ impl ConnectedNode {
             expires_at: now + Duration::days(365), // 1 year registration
             capabilities: NodeCapabilities::default_for(node_type),
             metadata: HashMap::new(),
+            r0_status: R0SkeletonStatus::default(),
+            p1_status: P1ConnectionStatus::default(),
         }
     }
 
@@ -186,6 +364,100 @@ impl ConnectedNode {
     /// Update last activity
     pub fn touch(&mut self) {
         self.last_active_at = Utc::now();
+    }
+
+    // ==== Connected Node Hard Requirements Checks ====
+
+    /// Get node connectivity classification
+    ///
+    /// Returns the connectivity status based on P1 and R0 requirements.
+    pub fn connectivity(&self) -> NodeConnectivity {
+        let has_r0 = self.r0_status.is_valid();
+        let has_p1 = self.p1_status.is_valid();
+
+        if has_r0 && has_p1 {
+            NodeConnectivity::FullyConnected
+        } else if self.r0_status.has_r0 || self.p1_status.connected {
+            // Has partial connections but they're not all valid
+            NodeConnectivity::Degraded
+        } else {
+            NodeConnectivity::LocalOnly
+        }
+    }
+
+    /// Check if node is fully connected (has P1 + R0)
+    ///
+    /// **HARD REQUIREMENT**: Only fully connected nodes can participate
+    /// in cross-node operations like reconciliation and sharing.
+    pub fn is_fully_connected(&self) -> bool {
+        self.connectivity() == NodeConnectivity::FullyConnected
+    }
+
+    /// Check if node is local-only (missing P1 or R0)
+    ///
+    /// Local-only nodes:
+    /// - Cannot participate in cross-node reconciliation
+    /// - Are not recognized by other connected nodes
+    /// - Cannot share or receive payload mappings
+    pub fn is_local_only(&self) -> bool {
+        !self.r0_status.is_valid() || !self.p1_status.is_valid()
+    }
+
+    /// Check if node can participate in cross-node operations
+    ///
+    /// Requires:
+    /// 1. Node is active
+    /// 2. Trust score meets requirements
+    /// 3. Node is fully connected (has P1 + R0)
+    pub fn can_participate_cross_node(&self) -> bool {
+        self.can_participate() && self.is_fully_connected()
+    }
+
+    /// Get detailed reason why node cannot participate in cross-node operations
+    pub fn cross_node_participation_blocked_reason(&self) -> Option<String> {
+        if !self.is_active() {
+            return Some("Node is not active".to_string());
+        }
+        if self.trust_score.value < self.node_type.min_trust_score() {
+            return Some(format!(
+                "Trust score {} is below required {}",
+                self.trust_score.value,
+                self.node_type.min_trust_score()
+            ));
+        }
+        if !self.r0_status.is_valid() {
+            if !self.r0_status.has_r0 {
+                return Some("Missing R0 skeleton package".to_string());
+            }
+            if !self.r0_status.verified {
+                return Some(format!(
+                    "R0 skeleton verification failed: {}",
+                    self.r0_status.verification_error.as_deref().unwrap_or("unknown")
+                ));
+            }
+        }
+        if !self.p1_status.is_valid() {
+            if !self.p1_status.connected {
+                return Some("P1 connection not established".to_string());
+            }
+            if !self.p1_status.healthy {
+                return Some(format!(
+                    "P1 connection unhealthy: {}",
+                    self.p1_status.error.as_deref().unwrap_or("unknown")
+                ));
+            }
+        }
+        None
+    }
+
+    /// Set R0 skeleton status
+    pub fn set_r0_status(&mut self, status: R0SkeletonStatus) {
+        self.r0_status = status;
+    }
+
+    /// Set P1 connection status
+    pub fn set_p1_status(&mut self, status: P1ConnectionStatus) {
+        self.p1_status = status;
     }
 }
 
@@ -722,6 +994,126 @@ impl<H: NodeHealthChecker> NodeAdmissionController<H> {
         }
 
         Ok("admitted")
+    }
+
+    /// Check if a node can perform cross-node operations
+    ///
+    /// **HARD REQUIREMENTS** (per DSN documentation Chapter 2):
+    ///
+    /// 1. Node must pass basic admission check
+    /// 2. Node must have valid R0 skeleton package
+    /// 3. Node must have valid P1 (L0) connection
+    ///
+    /// Nodes failing these requirements are "local-only" and CANNOT:
+    /// - Participate in cross-node reconciliation
+    /// - Be recognized by other connected nodes
+    /// - Share or receive payload mappings
+    pub async fn check_cross_node_admission(&self, node_id: &str) -> AdmissionResult<NodeConnectivity> {
+        // First, run basic admission check
+        self.check_admission(node_id).await?;
+
+        let nodes = self.nodes.read().await;
+        let node = nodes.get(node_id).ok_or_else(|| AdmissionError::NodeNotRegistered {
+            node_id: node_id.to_string(),
+        })?;
+
+        // Check R0 skeleton package (HARD REQUIREMENT)
+        if !node.r0_status.has_r0 {
+            return Err(AdmissionError::MissingR0Skeleton {
+                node_id: node_id.to_string(),
+            });
+        }
+
+        if !node.r0_status.verified {
+            return Err(AdmissionError::R0VerificationFailed {
+                reason: node.r0_status.verification_error.clone()
+                    .unwrap_or_else(|| "R0 skeleton not verified".to_string()),
+            });
+        }
+
+        // Check P1 connection (HARD REQUIREMENT)
+        if !node.p1_status.connected {
+            return Err(AdmissionError::MissingP1Connection {
+                node_id: node_id.to_string(),
+            });
+        }
+
+        if !node.p1_status.healthy {
+            return Err(AdmissionError::MissingP1Connection {
+                node_id: node_id.to_string(),
+            });
+        }
+
+        // All checks passed - node is fully connected
+        Ok(NodeConnectivity::FullyConnected)
+    }
+
+    /// Check if node is local-only (cannot participate in cross-node operations)
+    pub async fn is_node_local_only(&self, node_id: &str) -> AdmissionResult<bool> {
+        let nodes = self.nodes.read().await;
+        let node = nodes.get(node_id).ok_or_else(|| AdmissionError::NodeNotRegistered {
+            node_id: node_id.to_string(),
+        })?;
+
+        Ok(node.is_local_only())
+    }
+
+    /// Set R0 skeleton status for a node
+    pub async fn set_r0_status(&self, node_id: &str, status: R0SkeletonStatus) -> AdmissionResult<()> {
+        let mut nodes = self.nodes.write().await;
+        let node = nodes.get_mut(node_id).ok_or_else(|| AdmissionError::NodeNotRegistered {
+            node_id: node_id.to_string(),
+        })?;
+
+        node.set_r0_status(status);
+
+        tracing::info!(
+            node_id = %node_id,
+            has_r0 = %node.r0_status.has_r0,
+            verified = %node.r0_status.verified,
+            "Updated R0 skeleton status"
+        );
+
+        Ok(())
+    }
+
+    /// Set P1 connection status for a node
+    pub async fn set_p1_status(&self, node_id: &str, status: P1ConnectionStatus) -> AdmissionResult<()> {
+        let mut nodes = self.nodes.write().await;
+        let node = nodes.get_mut(node_id).ok_or_else(|| AdmissionError::NodeNotRegistered {
+            node_id: node_id.to_string(),
+        })?;
+
+        node.set_p1_status(status);
+
+        tracing::info!(
+            node_id = %node_id,
+            connected = %node.p1_status.connected,
+            healthy = %node.p1_status.healthy,
+            "Updated P1 connection status"
+        );
+
+        Ok(())
+    }
+
+    /// Get all fully connected nodes (have both P1 and R0)
+    pub async fn get_fully_connected_nodes(&self) -> Vec<ConnectedNode> {
+        let nodes = self.nodes.read().await;
+        nodes
+            .values()
+            .filter(|n| n.is_active() && n.is_fully_connected())
+            .cloned()
+            .collect()
+    }
+
+    /// Get all local-only nodes (missing P1 or R0)
+    pub async fn get_local_only_nodes(&self) -> Vec<ConnectedNode> {
+        let nodes = self.nodes.read().await;
+        nodes
+            .values()
+            .filter(|n| n.is_active() && n.is_local_only())
+            .cloned()
+            .collect()
     }
 
     /// Record a trust event for a node

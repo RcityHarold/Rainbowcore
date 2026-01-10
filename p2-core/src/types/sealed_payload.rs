@@ -2,16 +2,85 @@
 //!
 //! P2's fundamental storage unit - encrypted payload references.
 //! These are the basic building blocks of the encrypted permanence domain.
+//!
+//! # Version Requirements (DSN Documentation Chapter 3)
+//!
+//! Per DSN documentation, sealed_payload_ref requires FOUR elements:
+//! - `ref_id`: Reference identifier
+//! - `checksum`: Payload checksum
+//! - `access_policy_version`: Access policy version
+//! - `payload_format_version`: Payload format/encoding version (REQUIRED)
+//!
+//! **HARD RULE**: UnknownVersion must refuse strong verification.
+//! This prevents incorrect interpretation of payload format during decryption.
 
 use chrono::{DateTime, Utc};
 use l0_core::types::Digest;
 use serde::{Deserialize, Serialize};
+
+/// Payload format version information
+///
+/// Per DSN documentation, sealed payloads MUST include format version
+/// to ensure correct interpretation during decryption and verification.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PayloadFormatVersion {
+    /// Payload encoding version (how payload is structured)
+    pub encoding_version: String,
+
+    /// Encryption envelope version (how encryption is applied)
+    pub envelope_version: String,
+
+    /// Checksum algorithm version
+    pub checksum_version: String,
+}
+
+impl PayloadFormatVersion {
+    /// Current format version
+    pub fn current() -> Self {
+        Self {
+            encoding_version: "1.0.0".to_string(),
+            envelope_version: "1.0.0".to_string(),
+            checksum_version: "blake3-1.0".to_string(),
+        }
+    }
+
+    /// Check if format version is known/supported
+    ///
+    /// **HARD RULE**: UnknownVersion must refuse strong verification.
+    pub fn is_known(&self) -> bool {
+        self.encoding_version == "1.0.0"
+            && self.envelope_version == "1.0.0"
+            && self.checksum_version == "blake3-1.0"
+    }
+
+    /// Get description of unknown versions (if any)
+    pub fn unknown_versions(&self) -> Vec<(&'static str, &str)> {
+        let mut unknown = Vec::new();
+        if self.encoding_version != "1.0.0" {
+            unknown.push(("encoding_version", self.encoding_version.as_str()));
+        }
+        if self.envelope_version != "1.0.0" {
+            unknown.push(("envelope_version", self.envelope_version.as_str()));
+        }
+        if self.checksum_version != "blake3-1.0" {
+            unknown.push(("checksum_version", self.checksum_version.as_str()));
+        }
+        unknown
+    }
+}
 
 /// P2 Sealed Payload Reference - P2's basic storage unit
 ///
 /// A sealed payload reference points to an encrypted blob stored in P2.
 /// It contains metadata for integrity verification and access control,
 /// but never contains the actual encrypted content.
+///
+/// # Four Required Elements (DSN Documentation)
+///
+/// 1. `ref_id` - Reference identifier
+/// 2. `checksum` - Payload checksum for integrity
+/// 3. `access_policy_version` - Access policy version
+/// 4. `format_version` - Payload format version (REQUIRED for correct decryption)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SealedPayloadRef {
     /// Reference identifier (CID/URI/BlobRef - backend agnostic)
@@ -25,6 +94,11 @@ pub struct SealedPayloadRef {
 
     /// Access policy version
     pub access_policy_version: String,
+
+    /// Payload format version (REQUIRED per DSN documentation)
+    /// Contains: encoding_version, envelope_version, checksum_version
+    #[serde(default)]
+    pub format_version: PayloadFormatVersion,
 
     /// Payload size in bytes
     pub size_bytes: u64,
@@ -61,6 +135,7 @@ impl SealedPayloadRef {
             checksum,
             encryption_meta_digest,
             access_policy_version: "v1".to_string(),
+            format_version: PayloadFormatVersion::current(),
             size_bytes,
             status: SealedPayloadStatus::Active,
             temperature: StorageTemperature::Hot,
@@ -71,6 +146,19 @@ impl SealedPayloadRef {
         }
     }
 
+    /// Create with specific format version
+    pub fn new_with_format(
+        ref_id: String,
+        checksum: Digest,
+        encryption_meta_digest: Digest,
+        size_bytes: u64,
+        format_version: PayloadFormatVersion,
+    ) -> Self {
+        let mut payload = Self::new(ref_id, checksum, encryption_meta_digest, size_bytes);
+        payload.format_version = format_version;
+        payload
+    }
+
     /// Check if the payload is accessible
     pub fn is_accessible(&self) -> bool {
         matches!(self.status, SealedPayloadStatus::Active)
@@ -79,6 +167,27 @@ impl SealedPayloadRef {
     /// Check if the payload is tombstoned
     pub fn is_tombstoned(&self) -> bool {
         matches!(self.status, SealedPayloadStatus::Tombstoned)
+    }
+
+    /// Check if format version is known/supported
+    ///
+    /// **HARD RULE**: UnknownVersion must refuse strong verification.
+    pub fn has_known_format(&self) -> bool {
+        self.format_version.is_known()
+    }
+
+    /// Get unknown format versions (if any)
+    pub fn unknown_format_versions(&self) -> Vec<(&'static str, &str)> {
+        self.format_version.unknown_versions()
+    }
+
+    /// Check if payload can be verified with strong guarantees
+    ///
+    /// Strong verification requires:
+    /// 1. Known format version
+    /// 2. Payload is accessible
+    pub fn can_strong_verify(&self) -> bool {
+        self.has_known_format() && self.is_accessible()
     }
 
     /// Update last accessed timestamp

@@ -55,6 +55,8 @@
 pub mod crypto;
 pub mod degraded_mode;
 pub mod error;
+#[cfg(test)]
+pub mod hard_invariants_tests;
 pub mod ledger;
 pub mod node_admission;
 pub mod rtbf;
@@ -67,12 +69,12 @@ pub use error::{P2Error, P2Result};
 
 pub use types::{
     // Sealed Payload
-    SealedPayloadRef, SealedPayloadStatus, StorageTemperature, EncryptionMetadata,
+    SealedPayloadRef, SealedPayloadStatus, StorageTemperature, EncryptionMetadata, PayloadFormatVersion,
     // Resurrection
     SkeletonSnapshot, FullResurrectionSnapshot, R0Trigger, R1Trigger,
     ContinuityState, MapCommitRef, MissingPayloads, MissingReason,
     // Evidence
-    EvidenceBundle, EvidenceLevel, EvidenceType, EvidenceBundleStatus,
+    EvidenceBundle, EvidenceType, EvidenceBundleStatus,
     // Tickets
     AccessTicket, TicketPermission, TicketStatus, TicketValidation, TicketError, TicketRequest,
     // Selectors
@@ -103,8 +105,8 @@ pub use crypto::{
 
 pub use degraded_mode::{
     DegradedModeManager, DegradedModePolicy, DegradedModeState, DsnAvailabilityState,
-    OperationCheck, OperationType, RecoveryProgress, StateTransition,
-    DegradedModeError, DegradedModeResult,
+    OperationCheck, OperationType,
+    DegradedModeError,
 };
 
 pub use rtbf::{

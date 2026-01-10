@@ -249,7 +249,7 @@ impl SignedBatchSnapshot {
         signer_set: &SignerSetRef,
     ) -> ThresholdSignatureVerification {
         // Parse threshold rule
-        let (threshold_num, threshold_denom) = match signer_set.parse_threshold() {
+        let (threshold_num, _threshold_denom) = match signer_set.parse_threshold() {
             Ok(t) => t,
             Err(e) => {
                 return ThresholdSignatureVerification {
@@ -292,7 +292,7 @@ impl SignedBatchSnapshot {
         }
 
         // Get the message to verify
-        let message = self.signing_message();
+        let _message = self.signing_message();
 
         // Verify each signer's contribution
         // Note: Actual cryptographic verification depends on the signature scheme

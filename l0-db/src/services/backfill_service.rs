@@ -140,12 +140,16 @@ impl BackfillService {
             request_id: entity.request_id.clone(),
             actor_id: ActorId(entity.actor_id.clone()),
             status: Self::str_to_status(&entity.status),
+            backfill_type: l0_core::types::BackfillType::P1Initiated, // Default type
             start_digest: Digest::from_hex(&entity.start_digest).unwrap_or_default(),
             start_sequence_no: entity.start_sequence_no,
             end_digest: Digest::from_hex(&entity.end_digest).unwrap_or_default(),
             end_sequence_no: entity.end_sequence_no,
             tip_witness_ref: entity.tip_witness_ref.clone(),
             scope_filter: None, // Simplified for now
+            time_window: None,
+            coordination_state: None,
+            original_window_ref: None,
             requested_at: entity.requested_at,
             completed_at: entity.completed_at,
             receipt_id: entity.receipt_id.clone().map(ReceiptId),

@@ -45,6 +45,7 @@
 //! ```
 
 pub mod backfill;
+pub mod canonicalization;
 pub mod cross_node_sync;
 pub mod error;
 pub mod evidence_level;
@@ -55,6 +56,10 @@ pub mod three_phase_sync;
 pub use backfill::{
     BackfillBatchResult, BackfillEntry, BackfillExecutor, BackfillLedger, BackfillResult,
     BackfillStats, BackfillStatus, EvidenceUpdater, InMemoryBackfillLedger,
+};
+pub use canonicalization::{
+    CanonicalizationError, CanonicalizationResult, CanonicalizationVersion, Canonicalizer,
+    CanonicalizerRegistry, V1Canonicalizer,
 };
 pub use cross_node_sync::{
     CrossNodeSyncConfig, CrossNodeSyncCoordinator, NodeInfo, NodeInfoUpdate, NodeType,
@@ -109,10 +114,10 @@ pub enum ReconciliationStatus {
 
 impl ReconciliationStatus {
     /// Get evidence level for this reconciliation status
-    pub fn evidence_level(&self) -> p2_core::types::EvidenceLevel {
+    pub fn evidence_level(&self) -> l0_core::types::EvidenceLevel {
         match self {
-            ReconciliationStatus::Reconciled => p2_core::types::EvidenceLevel::A,
-            _ => p2_core::types::EvidenceLevel::B,
+            ReconciliationStatus::Reconciled => l0_core::types::EvidenceLevel::A,
+            _ => l0_core::types::EvidenceLevel::B,
         }
     }
 }
@@ -125,19 +130,19 @@ mod tests {
     fn test_reconciliation_evidence_levels() {
         assert_eq!(
             ReconciliationStatus::Reconciled.evidence_level(),
-            p2_core::types::EvidenceLevel::A
+            l0_core::types::EvidenceLevel::A
         );
         assert_eq!(
             ReconciliationStatus::Pending.evidence_level(),
-            p2_core::types::EvidenceLevel::B
+            l0_core::types::EvidenceLevel::B
         );
         assert_eq!(
             ReconciliationStatus::Mismatch.evidence_level(),
-            p2_core::types::EvidenceLevel::B
+            l0_core::types::EvidenceLevel::B
         );
         assert_eq!(
             ReconciliationStatus::Missing.evidence_level(),
-            p2_core::types::EvidenceLevel::B
+            l0_core::types::EvidenceLevel::B
         );
     }
 }

@@ -130,7 +130,7 @@ pub use performance::{
         PerformanceTestConfig, PerformanceTestResult, PerformanceTestHarness,
         LatencyPercentiles, CurrentMetrics,
         FaultType, FaultConfig, FaultTestResult, FaultInjector, FaultTestHarness,
-        OperationStats, DataIntegrityResult,
+        DataIntegrityResult,
     },
 };
 

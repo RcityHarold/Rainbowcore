@@ -251,7 +251,7 @@ impl PerformanceTestHarness {
 
     /// Run a performance test
     pub async fn run_test<F, Fut>(
-        &self,
+        self: Arc<Self>,
         config: PerformanceTestConfig,
         operation: F,
     ) -> PerformanceTestResult
@@ -278,7 +278,7 @@ impl PerformanceTestHarness {
         // Spawn workers
         let mut handles = Vec::new();
         let operation = Arc::new(operation);
-        let harness = Arc::new(self);
+        let harness = self.clone();
 
         for worker_id in 0..config.workers {
             let op = operation.clone();

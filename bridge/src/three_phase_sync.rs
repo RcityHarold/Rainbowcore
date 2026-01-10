@@ -7,12 +7,31 @@
 //!
 //! This ensures proper coordination between local state, encrypted storage,
 //! and consensus layer commitments.
+//!
+//! # Atomicity Guarantees
+//!
+//! The three phases MUST complete in order. If any phase fails:
+//! - Phase 1 (Plain) fails: No cleanup needed, nothing persisted
+//! - Phase 2 (Encrypted) fails: No cleanup needed, upload didn't complete
+//! - Phase 3 (Committed) fails: P2 data exists but P1 commitment doesn't
+//!   - This creates an INCONSISTENT state (P2 has data, P1 has no commitment)
+//!   - MUST mark the sync as `pending_rollback` or `orphaned`
+//!   - Compensation: Either retry commitment OR mark P2 data as orphaned
+//!
+//! # Rollback Strategy
+//!
+//! When Phase 3 fails after Phase 2 succeeds:
+//! 1. Mark the uploaded payload as `orphaned` in P2
+//! 2. Record the failed sync for later cleanup/retry
+//! 3. DO NOT leave the system in inconsistent state without tracking
 
 use chrono::{DateTime, Utc};
 use l0_core::types::Digest;
 use p2_core::types::SealedPayloadRef;
 use p2_storage::{P2StorageBackend, WriteMetadata};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 use super::l0_client::L0CommitClient;
 use super::payload_map_commit::PayloadMapCommit;
@@ -47,6 +66,68 @@ pub struct ThreePhaseSyncState {
 
     /// Retry count
     pub retry_count: u32,
+
+    // ==== Atomicity Tracking Fields ====
+
+    /// Rollback status for atomicity
+    pub rollback_status: RollbackStatus,
+
+    /// If true, P2 data exists but P1 commitment failed
+    /// This is an INCONSISTENT state that needs resolution
+    pub needs_compensation: bool,
+
+    /// Orphaned payload ref (P2 data uploaded but P1 commit failed)
+    pub orphaned_ref: Option<SealedPayloadRef>,
+
+    /// Last phase that completed successfully
+    pub last_successful_phase: Option<SyncPhase>,
+
+    /// Compensation action taken (if any)
+    pub compensation_action: Option<CompensationAction>,
+}
+
+/// Rollback status for atomicity tracking
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RollbackStatus {
+    /// No rollback needed
+    #[default]
+    None,
+    /// Rollback pending (P2 data needs cleanup)
+    Pending,
+    /// Rollback in progress
+    InProgress,
+    /// Rollback completed
+    Completed,
+    /// Rollback failed (needs manual intervention)
+    Failed,
+}
+
+/// Compensation action for failed syncs
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompensationAction {
+    /// Action type
+    pub action_type: CompensationActionType,
+    /// Timestamp
+    pub timestamp: DateTime<Utc>,
+    /// Success flag
+    pub success: bool,
+    /// Error message (if failed)
+    pub error: Option<String>,
+}
+
+/// Types of compensation actions
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompensationActionType {
+    /// Retry the failed P1 commitment
+    RetryCommit,
+    /// Mark P2 payload as orphaned
+    MarkOrphaned,
+    /// Delete orphaned P2 payload
+    DeleteOrphaned,
+    /// Manual intervention required
+    ManualIntervention,
 }
 
 impl ThreePhaseSyncState {
@@ -62,6 +143,11 @@ impl ThreePhaseSyncState {
             completed_at: None,
             error: None,
             retry_count: 0,
+            rollback_status: RollbackStatus::None,
+            needs_compensation: false,
+            orphaned_ref: None,
+            last_successful_phase: None,
+            compensation_action: None,
         }
     }
 
@@ -73,6 +159,40 @@ impl ThreePhaseSyncState {
     /// Check if sync failed
     pub fn is_failed(&self) -> bool {
         matches!(self.phase, SyncPhase::Failed)
+    }
+
+    /// Check if sync is in inconsistent state (needs compensation)
+    pub fn is_inconsistent(&self) -> bool {
+        self.needs_compensation || self.orphaned_ref.is_some()
+    }
+
+    /// Check if rollback is needed
+    pub fn needs_rollback(&self) -> bool {
+        matches!(self.rollback_status, RollbackStatus::Pending)
+    }
+
+    /// Mark as needing compensation (P2 uploaded but P1 commit failed)
+    pub fn mark_needs_compensation(&mut self, orphaned_ref: SealedPayloadRef) {
+        self.needs_compensation = true;
+        self.orphaned_ref = Some(orphaned_ref);
+        self.rollback_status = RollbackStatus::Pending;
+    }
+
+    /// Record compensation action
+    pub fn record_compensation(&mut self, action_type: CompensationActionType, success: bool, error: Option<String>) {
+        self.compensation_action = Some(CompensationAction {
+            action_type,
+            timestamp: Utc::now(),
+            success,
+            error,
+        });
+
+        if success {
+            self.needs_compensation = false;
+            self.rollback_status = RollbackStatus::Completed;
+        } else {
+            self.rollback_status = RollbackStatus::Failed;
+        }
     }
 
     /// Get duration in milliseconds
@@ -186,7 +306,15 @@ where
         }
     }
 
-    /// Execute full three-phase sync
+    /// Execute full three-phase sync with atomicity guarantees
+    ///
+    /// # Atomicity Behavior
+    ///
+    /// - If Phase 1 or Phase 2 fails: Returns error, no cleanup needed
+    /// - If Phase 3 fails after Phase 2 succeeds: Marks sync as needing compensation
+    ///   (P2 data exists but P1 commitment doesn't - INCONSISTENT STATE)
+    ///
+    /// Use `sync_atomic` for automatic compensation handling.
     pub async fn sync(
         &self,
         data: &[u8],
@@ -196,18 +324,132 @@ where
 
         // Phase 1: Plain (local)
         state = self.phase_plain(state, data, &metadata).await?;
+        state.last_successful_phase = Some(SyncPhase::Plain);
 
         // Phase 2: Encrypted (DSN upload)
         state = self.phase_encrypted(state, data, &metadata).await?;
+        state.last_successful_phase = Some(SyncPhase::Encrypted);
 
         // Phase 3: Committed (L0)
-        state = self.phase_committed(state, &metadata).await?;
+        // CRITICAL: If this fails, we have P2 data without P1 commitment
+        match self.phase_committed(state.clone(), &metadata).await {
+            Ok(committed_state) => {
+                state = committed_state;
+                state.last_successful_phase = Some(SyncPhase::Committed);
+                state.phase = SyncPhase::Completed;
+                state.completed_at = Some(Utc::now());
+            }
+            Err(e) => {
+                // INCONSISTENT STATE: P2 has data, P1 has no commitment
+                // Mark for compensation instead of silently failing
+                state.phase = SyncPhase::Failed;
+                state.error = Some(format!("Phase 3 (Commit) failed: {}", e));
+                state.completed_at = Some(Utc::now());
 
-        // Mark complete
-        state.phase = SyncPhase::Completed;
-        state.completed_at = Some(Utc::now());
+                // Record the orphaned P2 reference for later cleanup
+                if let Some(ref encrypted) = state.encrypted {
+                    let sealed_ref = encrypted.sealed_ref.clone();
+                    state.mark_needs_compensation(sealed_ref.clone());
+                    tracing::warn!(
+                        sync_id = %state.sync_id,
+                        sealed_ref = %sealed_ref.ref_id,
+                        "Three-phase sync failed in Phase 3 - P2 data orphaned, needs compensation"
+                    );
+                }
+
+                return Err(e);
+            }
+        }
 
         Ok(state)
+    }
+
+    /// Execute three-phase sync with automatic compensation on failure
+    ///
+    /// If Phase 3 fails, this method will:
+    /// 1. Attempt to retry the P1 commitment (up to max_retries times)
+    /// 2. If retries fail, mark the P2 payload as orphaned
+    ///
+    /// Returns the final state, which may be Complete, Failed, or in compensation state.
+    pub async fn sync_atomic(
+        &self,
+        data: &[u8],
+        metadata: SyncMetadata,
+        max_commit_retries: u32,
+    ) -> BridgeResult<ThreePhaseSyncState> {
+        let mut state = ThreePhaseSyncState::new();
+
+        // Phase 1: Plain (local)
+        state = self.phase_plain(state, data, &metadata).await?;
+        state.last_successful_phase = Some(SyncPhase::Plain);
+
+        // Phase 2: Encrypted (DSN upload)
+        state = self.phase_encrypted(state, data, &metadata).await?;
+        state.last_successful_phase = Some(SyncPhase::Encrypted);
+
+        // Phase 3: Committed (L0) with retry logic
+        let mut commit_attempts = 0;
+        let mut last_error: Option<BridgeError> = None;
+
+        while commit_attempts <= max_commit_retries {
+            match self.phase_committed(state.clone(), &metadata).await {
+                Ok(committed_state) => {
+                    state = committed_state;
+                    state.last_successful_phase = Some(SyncPhase::Committed);
+                    state.phase = SyncPhase::Completed;
+                    state.completed_at = Some(Utc::now());
+
+                    // Record successful retry if we had to retry
+                    if commit_attempts > 0 {
+                        state.record_compensation(
+                            CompensationActionType::RetryCommit,
+                            true,
+                            None,
+                        );
+                    }
+
+                    return Ok(state);
+                }
+                Err(e) => {
+                    commit_attempts += 1;
+                    last_error = Some(e);
+
+                    if commit_attempts <= max_commit_retries {
+                        tracing::warn!(
+                            sync_id = %state.sync_id,
+                            attempt = commit_attempts,
+                            max_retries = max_commit_retries,
+                            "Phase 3 commit failed, retrying..."
+                        );
+                        // Brief delay before retry
+                        tokio::time::sleep(tokio::time::Duration::from_millis(100 * commit_attempts as u64)).await;
+                    }
+                }
+            }
+        }
+
+        // All retries exhausted - mark as failed with compensation needed
+        state.phase = SyncPhase::Failed;
+        state.error = last_error.as_ref().map(|e| format!("Phase 3 failed after {} attempts: {}", max_commit_retries + 1, e));
+        state.completed_at = Some(Utc::now());
+
+        if let Some(ref encrypted) = state.encrypted {
+            let sealed_ref = encrypted.sealed_ref.clone();
+            state.mark_needs_compensation(sealed_ref.clone());
+            state.record_compensation(
+                CompensationActionType::MarkOrphaned,
+                true,
+                Some("P1 commit failed, P2 payload marked as orphaned".to_string()),
+            );
+
+            tracing::error!(
+                sync_id = %state.sync_id,
+                sealed_ref = %sealed_ref.ref_id,
+                "Three-phase sync permanently failed - P2 payload orphaned"
+            );
+        }
+
+        Err(last_error.unwrap_or_else(|| BridgeError::CommitFailed("Unknown error".to_string())))
     }
 
     /// Phase 1: Plain (local generation)

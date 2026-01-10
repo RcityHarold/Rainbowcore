@@ -23,22 +23,28 @@ pub use access_ticket::{
     TicketValidation,
 };
 pub use audit_artifacts::{
-    AdditionalCheck, AuditSummary, ClientInfo, DecryptAuditLog, DecryptOutcome,
-    ExportAuditLog, ExportDestinationType, ExportFormat, ReachabilityStatus, SamplingArtifact,
-    SamplingPolicy, TicketAuditLog, TicketOperation, TicketOperationOutcome,
+    AdditionalCheck, AuditErrorCode, AuditGuardState, AuditLogWriter, AuditSummary,
+    AuditWriteError, AuditWriteResult, ClientInfo, DecryptAuditLog, DecryptOutcome,
+    ExportAuditLog, ExportDestinationType, ExportFormat, MandatoryAuditGuard,
+    MandatoryAuditOperation, ReachabilityStatus, SamplingArtifact, SamplingPolicy,
+    TicketAuditLog, TicketOperation, TicketOperationOutcome,
+    create_decrypt_audit_guard, create_export_audit_guard, create_ticket_audit_guard,
 };
 pub use evidence_bundle::{
-    EvidenceBundle, EvidenceBundleStatus, EvidenceLevel, EvidenceSubmission, EvidenceType,
-    PayloadSubmission,
+    AvailabilityStatus, EvidenceAvailability, EvidenceBundle, EvidenceBundleStatus,
+    EvidenceLevelDetails, EvidenceLevelDowngradeReason, EvidenceSubmission,
+    EvidenceType, EvidenceVerificationState, PayloadSubmission, TemperatureImpact,
 };
 pub use resurrection::{
     ContinuitySkeleton, ContinuityState, FullResurrectionSnapshot, GovernanceStateSkeleton,
-    ManifestShard, MapCommitRef, MinimalBootConfig, MinimalRelationshipSkeleton, MissingPayloads,
-    MissingReason, R0Trigger, R1Trigger, SkeletonManifest, SkeletonSnapshot, SubjectProof,
-    TripleCommits,
+    MSNApprovalDecision, MSNApprovalDetails, MSNApprovalStatus, MSNRejectionReason,
+    MSNValidationError, MSNValidationResult, MSNWithApproval, ManifestShard, MapCommitRef,
+    MinimalBootConfig, MinimalRelationshipSkeleton, MissingPayloads, MissingReason,
+    R0Trigger, R0ValidationError, R0ValidationResult, R1Trigger, SkeletonManifest,
+    SkeletonSnapshot, SubjectProof, TripleCommits,
 };
 pub use sealed_payload::{
-    EncryptionMetadata, SealedPayloadRef, SealedPayloadStatus, StorageTemperature,
+    EncryptionMetadata, PayloadFormatVersion, SealedPayloadRef, SealedPayloadStatus, StorageTemperature,
     ThresholdEncryptionInfo,
 };
 pub use selector::{PayloadSelector, SelectorType, SelectorValidation};

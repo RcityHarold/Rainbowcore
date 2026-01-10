@@ -50,6 +50,20 @@ pub trait SnapshotLedger: Send + Sync {
 
     /// Verify snapshot integrity
     async fn verify_snapshot(&self, snapshot_id: &str) -> P2Result<bool>;
+
+    /// Update snapshot with map commit reference (after L0 submission)
+    async fn set_snapshot_map_commit(
+        &self,
+        snapshot_id: &str,
+        map_commit_ref: String,
+    ) -> P2Result<()>;
+
+    /// Update snapshot with receipt (after P1 commitment)
+    async fn set_snapshot_receipt(
+        &self,
+        snapshot_id: &str,
+        receipt_id: l0_core::types::ReceiptId,
+    ) -> P2Result<()>;
 }
 
 /// Evidence Ledger - manages evidence bundles
@@ -197,6 +211,30 @@ pub trait AuditLedger: Send + Sync {
         resource_ref: &str,
         limit: usize,
     ) -> P2Result<Vec<TicketAuditLog>>;
+
+    /// Get audit statistics
+    async fn get_stats(&self) -> P2Result<AuditStats>;
+
+    /// Get export logs by actor
+    async fn get_export_logs_by_actor(
+        &self,
+        actor_id: &ActorId,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> P2Result<Vec<ExportAuditLog>>;
+}
+
+/// Audit statistics
+#[derive(Debug, Clone)]
+pub struct AuditStats {
+    pub total_entries: usize,
+    pub decrypt_count: usize,
+    pub export_count: usize,
+    pub sampling_count: usize,
+    pub ticket_count: usize,
+    pub failed_count: usize,
+    pub oldest_timestamp: Option<DateTime<Utc>>,
+    pub newest_timestamp: Option<DateTime<Utc>>,
 }
 
 /// Payload Store - manages sealed payload storage

@@ -69,6 +69,14 @@ pub fn create_router(state: AppState) -> Router {
             "/api/v1/tickets/:ticket_id/access/:ref_id",
             get(handlers::use_ticket),
         )
+        // Snapshot endpoints
+        .nest("/api/v1/snapshots", handlers::snapshot::snapshot_router())
+        // Audit endpoints
+        .nest("/api/v1/audit", handlers::audit::audit_router())
+        // Sampling audit endpoints
+        .nest("/api/v1/sampling", handlers::sampling::sampling_router())
+        // RTBF (Right To Be Forgotten) endpoints
+        .nest("/api/v1/rtbf", handlers::rtbf::rtbf_router())
         // Admin endpoints
         .route("/api/v1/admin/stats", get(handlers::storage_stats))
         .route(

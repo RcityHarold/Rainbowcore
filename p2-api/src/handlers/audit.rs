@@ -130,7 +130,7 @@ pub struct AuditStatsResponse {
 ///
 /// GET /api/v1/audit
 pub async fn query_audit_logs(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Query(params): Query<AuditQueryParams>,
 ) -> Result<impl IntoResponse, ApiError> {
     info!(
@@ -140,16 +140,115 @@ pub async fn query_audit_logs(
         limit = params.limit,
         "Querying audit logs"
     );
+    let start = Instant::now();
 
-    // In a real implementation, this would query the AuditStore
-    // For now, return a sample response
+    // Route to specific query based on filters
+    let mut all_entries: Vec<AuditEntryResponse> = Vec::new();
+
+    // Query decrypt logs
+    if params.entry_type.is_none() || params.entry_type.as_deref() == Some("decrypt") {
+        if let Some(ref payload_ref) = params.payload_ref {
+            let logs = state.audit_ledger
+                .get_decrypt_logs_for_payload(payload_ref, 1000)
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            all_entries.extend(logs.iter().map(|log| AuditEntryResponse {
+                sequence: 0,
+                entry_type: "decrypt".to_string(),
+                timestamp: log.decrypted_at,
+                actor_id: Some(log.decryptor.0.clone()),
+                payload_ref: Some(log.target_payload_ref.clone()),
+                ticket_ref: Some(log.ticket_ref.clone()),
+                details: serde_json::json!({"outcome": format!("{:?}", log.outcome)}),
+                entry_hash: log.log_id.clone(),
+                prev_hash: None,
+            }));
+        } else if let Some(ref actor_id) = params.actor_id {
+            let from = params.from.unwrap_or_else(|| Utc::now() - chrono::Duration::days(30));
+            let to = params.to.unwrap_or_else(Utc::now);
+            let logs = state.audit_ledger
+                .get_decrypt_logs_by_actor(&ActorId::new(actor_id), from, to)
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            all_entries.extend(logs.iter().map(|log| AuditEntryResponse {
+                sequence: 0,
+                entry_type: "decrypt".to_string(),
+                timestamp: log.decrypted_at,
+                actor_id: Some(log.decryptor.0.clone()),
+                payload_ref: Some(log.target_payload_ref.clone()),
+                ticket_ref: Some(log.ticket_ref.clone()),
+                details: serde_json::json!({"outcome": format!("{:?}", log.outcome)}),
+                entry_hash: log.log_id.clone(),
+                prev_hash: None,
+            }));
+        }
+    }
+
+    // Query export logs
+    if params.entry_type.is_none() || params.entry_type.as_deref() == Some("export") {
+        if let Some(ref payload_ref) = params.payload_ref {
+            let logs = state.audit_ledger
+                .get_export_logs_for_payload(payload_ref)
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            all_entries.extend(logs.iter().map(|log| AuditEntryResponse {
+                sequence: 0,
+                entry_type: "export".to_string(),
+                timestamp: log.exported_at,
+                actor_id: Some(log.exporter.0.clone()),
+                payload_ref: log.payload_refs.first().cloned(),
+                ticket_ref: Some(log.ticket_ref.clone()),
+                details: serde_json::json!({
+                    "export_target": log.export_target.clone(),
+                    "export_format": format!("{:?}", log.export_format),
+                }),
+                entry_hash: log.log_id.clone(),
+                prev_hash: None,
+            }));
+        } else if let Some(ref actor_id) = params.actor_id {
+            let from = params.from.unwrap_or_else(|| Utc::now() - chrono::Duration::days(30));
+            let to = params.to.unwrap_or_else(Utc::now);
+            let logs = state.audit_ledger
+                .get_export_logs_by_actor(&ActorId::new(actor_id), from, to)
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            all_entries.extend(logs.iter().map(|log| AuditEntryResponse {
+                sequence: 0,
+                entry_type: "export".to_string(),
+                timestamp: log.exported_at,
+                actor_id: Some(log.exporter.0.clone()),
+                payload_ref: log.payload_refs.first().cloned(),
+                ticket_ref: Some(log.ticket_ref.clone()),
+                details: serde_json::json!({
+                    "export_target": log.export_target.clone(),
+                    "export_format": format!("{:?}", log.export_format),
+                }),
+                entry_hash: log.log_id.clone(),
+                prev_hash: None,
+            }));
+        }
+    }
+
+    // Sort by timestamp descending
+    all_entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+
+    // Apply pagination
+    let total_count = all_entries.len();
+    let paginated: Vec<_> = all_entries
+        .into_iter()
+        .skip(params.offset)
+        .take(params.limit)
+        .collect();
+
+    let query_time_ms = start.elapsed().as_millis() as u64;
+
     let response = AuditQueryResponse {
-        entries: vec![],
-        total_count: 0,
+        entries: paginated,
+        total_count,
         offset: params.offset,
         limit: params.limit,
-        chain_verified: true,
-        query_time_ms: 1,
+        chain_verified: false, // Chain verification not yet implemented
+        query_time_ms,
     };
 
     Ok(Json(response))
@@ -326,15 +425,20 @@ pub async fn get_audit_for_actor(
 /// Get a specific audit entry by sequence
 ///
 /// GET /api/v1/audit/entry/:sequence
+///
+/// NOTE: Sequence-based lookup is not currently implemented.
+/// The audit ledger stores logs by log_id (hash-based), not by global sequence number.
+/// For looking up specific audit entries, use the query endpoints with log_id filters,
+/// or use payload-specific/actor-specific queries.
 pub async fn get_audit_entry(
     State(_state): State<AppState>,
     Path(sequence): Path<u64>,
 ) -> Result<Json<AuditEntryResponse>, ApiError> {
     info!(sequence = sequence, "Getting audit entry");
 
-    // In a real implementation, this would look up the entry
+    // Sequence-based lookup not supported - logs are stored by log_id, not sequence
     Err(ApiError::NotFound(format!(
-        "Audit entry not found: {}",
+        "Sequence-based lookup not supported. Use log_id or query endpoints instead. Sequence: {}",
         sequence
     )))
 }
@@ -342,18 +446,36 @@ pub async fn get_audit_entry(
 /// Verify audit chain integrity
 ///
 /// POST /api/v1/audit/verify
+///
+/// NOTE: Hash-chain verification is not yet implemented.
+/// The current audit ledger stores individual encrypted logs but does not maintain
+/// a cryptographic hash chain (prev_hash pointers). Each log has its own hash (log_id)
+/// but logs are not chained together.
+///
+/// For production deployment, consider implementing:
+/// - Merkle tree structure for efficient batch verification
+/// - Or hash chain with prev_hash pointers
+/// - Or integration with P1 MapCommit for periodic anchoring
 pub async fn verify_audit_chain(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
 ) -> Result<impl IntoResponse, ApiError> {
     info!("Verifying audit chain integrity");
 
-    // In a real implementation, this would call audit_store.verify_chain()
+    // Get stats to show entries exist
+    let stats = state.audit_ledger
+        .get_stats()
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    // Return response indicating chain verification is not yet implemented
     let response = ChainVerificationResponse {
-        chain_id: "chain:pending".to_string(),
-        verified: true,
-        entries_checked: 0,
+        chain_id: "audit:main".to_string(),
+        verified: false,
+        entries_checked: stats.total_entries,
         verified_at: Utc::now(),
-        error: None,
+        error: Some(
+            "Hash-chain verification not yet implemented. Each log has integrity via encryption, but chain verification is pending.".to_string()
+        ),
     };
 
     Ok(Json(response))
@@ -363,20 +485,25 @@ pub async fn verify_audit_chain(
 ///
 /// GET /api/v1/audit/stats
 pub async fn get_audit_stats(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
 ) -> Result<impl IntoResponse, ApiError> {
     info!("Getting audit statistics");
 
+    let stats = state.audit_ledger
+        .get_stats()
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
     let response = AuditStatsResponse {
-        chain_id: "chain:pending".to_string(),
-        total_entries: 0,
-        decrypt_count: 0,
-        export_count: 0,
-        access_denied_count: 0,
-        policy_violation_count: 0,
-        chain_verified: true,
-        oldest_entry: None,
-        newest_entry: None,
+        chain_id: "audit:main".to_string(),
+        total_entries: stats.total_entries,
+        decrypt_count: stats.decrypt_count,
+        export_count: stats.export_count,
+        access_denied_count: stats.failed_count,
+        policy_violation_count: 0, // Not tracked separately
+        chain_verified: false, // Hash chain not yet implemented
+        oldest_entry: stats.oldest_timestamp,
+        newest_entry: stats.newest_timestamp,
         computed_at: Utc::now(),
     };
 
@@ -455,18 +582,65 @@ pub async fn get_decrypt_logs(
 ///
 /// GET /api/v1/audit/export
 pub async fn get_export_logs(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Query(params): Query<AuditQueryParams>,
 ) -> Result<impl IntoResponse, ApiError> {
     info!("Getting export audit logs");
+    let start = Instant::now();
+
+    // Query based on available filters
+    let entries = if let Some(ref payload_ref) = params.payload_ref {
+        // Query by payload
+        state.audit_ledger
+            .get_export_logs_for_payload(payload_ref)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?
+    } else if let Some(ref actor_id) = params.actor_id {
+        // Query by actor with time range
+        let from = params.from.unwrap_or_else(|| Utc::now() - chrono::Duration::days(30));
+        let to = params.to.unwrap_or_else(Utc::now);
+        state.audit_ledger
+            .get_export_logs_by_actor(&ActorId::new(actor_id), from, to)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?
+    } else {
+        // No filter - return empty for now (would need a list_all method)
+        vec![]
+    };
+
+    // Convert to response format
+    let audit_entries: Vec<AuditEntryResponse> = entries
+        .iter()
+        .enumerate()
+        .map(|(idx, log)| AuditEntryResponse {
+            sequence: idx as u64,
+            entry_type: "export".to_string(),
+            timestamp: log.exported_at,
+            actor_id: Some(log.exporter.0.clone()),
+            payload_ref: log.payload_refs.first().cloned(),
+            ticket_ref: Some(log.ticket_ref.clone()),
+            details: serde_json::json!({
+                "export_target": log.export_target.clone(),
+                "export_format": format!("{:?}", log.export_format),
+                "payload_count": log.payload_refs.len(),
+            }),
+            entry_hash: log.log_id.clone(),
+            prev_hash: None,
+        })
+        .skip(params.offset)
+        .take(params.limit)
+        .collect();
+
+    let total_count = entries.len();
+    let query_time_ms = start.elapsed().as_millis() as u64;
 
     let response = AuditQueryResponse {
-        entries: vec![],
-        total_count: 0,
+        entries: audit_entries,
+        total_count,
         offset: params.offset,
         limit: params.limit,
-        chain_verified: true,
-        query_time_ms: 1,
+        chain_verified: false, // Chain verification not implemented for export logs
+        query_time_ms,
     };
 
     Ok(Json(response))
@@ -515,7 +689,7 @@ pub struct ExportAuditResponse {
 }
 
 pub async fn export_audit_logs(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(request): Json<ExportAuditRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     info!(
@@ -525,15 +699,38 @@ pub async fn export_audit_logs(
         "Exporting audit logs"
     );
 
+    // Get all decrypt logs (we don't have a direct time-range query, so we need to filter)
+    // This is a simplification - in production, you'd want to add time-range queries to the trait
+    let stats = state.audit_ledger.get_stats().await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    // For now, we'll note that full export requires additional ledger methods
+    // Return the export request accepted with current stats
+    let entry_count = stats.total_entries;
+
+    tracing::info!(
+        export_count = entry_count,
+        format = %request.format,
+        "Audit export prepared (simplified - full time-range export pending ledger enhancement)"
+    );
+
     let response = ExportAuditResponse {
         export_id: format!("export:{}", uuid::Uuid::new_v4()),
-        entry_count: 0,
+        entry_count,
         format: request.format,
         from: request.from,
         to: request.to,
         exported_at: Utc::now(),
-        download_url: None,
+        download_url: None, // In production, generate signed URL for download
     };
+
+    // TODO: For production implementation:
+    // 1. Add time-range query methods to AuditLedger trait (list_all_logs_in_range)
+    // 2. Collect all logs (decrypt, export, ticket, sampling) in the time range
+    // 3. Format according to request.format (JSON, CSV)
+    // 4. Store export file in secure location
+    // 5. Generate signed download URL
+    // 6. Return URL in response or trigger async export with notification
 
     Ok((StatusCode::ACCEPTED, Json(response)))
 }

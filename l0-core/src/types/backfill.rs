@@ -757,7 +757,7 @@ impl TipWitnessGate {
     pub fn check_operation_with_time(
         &self,
         operation: &str,
-        actor_id: &ActorId,
+        _actor_id: &ActorId,
         last_witness: Option<&TipWitness>,
         is_first_time: bool,
         actor_registered_at: Option<DateTime<Utc>>,

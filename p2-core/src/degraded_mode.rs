@@ -198,6 +198,223 @@ pub struct DegradedModeState {
     pub consecutive_failures: u32,
     /// Queued operations (pending DSN recovery)
     pub queued_operations: u64,
+    /// P1 (L0 Consensus Layer) connection status
+    #[serde(default)]
+    pub p1_status: P1ConnectionStatus,
+    /// Econ subsystem status
+    #[serde(default)]
+    pub econ_status: EconSubsystemStatus,
+}
+
+// ============================================================================
+// P1 and Econ Linkage (问题10)
+// ============================================================================
+
+/// P1 (L0 Consensus Layer) Connection Status
+///
+/// Degraded mode MUST consider P1 connection status because:
+/// 1. Evidence level A requires P1 receipts
+/// 2. Map commits must be anchored to P1
+/// 3. High-consequence operations need P1 confirmation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct P1ConnectionStatus {
+    /// P1 is connected and responsive
+    pub connected: bool,
+    /// Last successful P1 interaction
+    pub last_success: Option<DateTime<Utc>>,
+    /// Current P1 endpoint (if connected)
+    pub endpoint: Option<String>,
+    /// P1 health status
+    pub health: P1HealthStatus,
+    /// Pending P1 operations count
+    pub pending_operations: u32,
+    /// Last error (if any)
+    pub last_error: Option<String>,
+}
+
+impl Default for P1ConnectionStatus {
+    fn default() -> Self {
+        Self {
+            connected: true, // Assume connected initially
+            last_success: Some(Utc::now()),
+            endpoint: None,
+            health: P1HealthStatus::Healthy,
+            pending_operations: 0,
+            last_error: None,
+        }
+    }
+}
+
+/// P1 health status
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum P1HealthStatus {
+    /// P1 is healthy and responsive
+    Healthy,
+    /// P1 is slow but operational
+    Degraded,
+    /// P1 is experiencing issues
+    Unhealthy,
+    /// P1 is unreachable
+    Unreachable,
+}
+
+impl Default for P1HealthStatus {
+    fn default() -> Self {
+        Self::Healthy
+    }
+}
+
+/// Econ Subsystem Status
+///
+/// Econ subsystem handles fee schedules, staking, and economic incentives.
+/// Its status affects:
+/// 1. Fee calculation for operations
+/// 2. Staking verification for high-value operations
+/// 3. Economic penalty enforcement
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EconSubsystemStatus {
+    /// Econ subsystem is operational
+    pub operational: bool,
+    /// Current fee schedule version
+    pub fee_schedule_version: Option<String>,
+    /// Staking verification available
+    pub staking_available: bool,
+    /// Last sync timestamp
+    pub last_sync: Option<DateTime<Utc>>,
+    /// Econ health
+    pub health: EconHealthStatus,
+    /// Pending settlements count
+    pub pending_settlements: u32,
+}
+
+impl Default for EconSubsystemStatus {
+    fn default() -> Self {
+        Self {
+            operational: true,
+            fee_schedule_version: Some("v1".to_string()),
+            staking_available: true,
+            last_sync: Some(Utc::now()),
+            health: EconHealthStatus::Healthy,
+            pending_settlements: 0,
+        }
+    }
+}
+
+/// Econ health status
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EconHealthStatus {
+    /// Fully operational
+    Healthy,
+    /// Operational but degraded
+    Degraded,
+    /// Limited functionality
+    Limited,
+    /// Unavailable
+    Unavailable,
+}
+
+impl Default for EconHealthStatus {
+    fn default() -> Self {
+        Self::Healthy
+    }
+}
+
+/// Combined system health for degraded mode decisions
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemHealthStatus {
+    /// DSN (P2) availability
+    pub dsn_state: DsnAvailabilityState,
+    /// P1 connection status
+    pub p1_status: P1ConnectionStatus,
+    /// Econ subsystem status
+    pub econ_status: EconSubsystemStatus,
+    /// Overall system health
+    pub overall_health: OverallHealthLevel,
+    /// Timestamp
+    pub timestamp: DateTime<Utc>,
+}
+
+impl SystemHealthStatus {
+    /// Calculate overall health from component statuses
+    pub fn calculate(
+        dsn_state: DsnAvailabilityState,
+        p1_status: &P1ConnectionStatus,
+        econ_status: &EconSubsystemStatus,
+    ) -> Self {
+        let overall_health = Self::compute_overall_health(&dsn_state, p1_status, econ_status);
+
+        Self {
+            dsn_state,
+            p1_status: p1_status.clone(),
+            econ_status: econ_status.clone(),
+            overall_health,
+            timestamp: Utc::now(),
+        }
+    }
+
+    fn compute_overall_health(
+        dsn_state: &DsnAvailabilityState,
+        p1_status: &P1ConnectionStatus,
+        econ_status: &EconSubsystemStatus,
+    ) -> OverallHealthLevel {
+        // If DSN is unavailable, system is critical
+        if matches!(dsn_state, DsnAvailabilityState::Unavailable) {
+            return OverallHealthLevel::Critical;
+        }
+
+        // If P1 is unreachable, system is critical (can't anchor anything)
+        if matches!(p1_status.health, P1HealthStatus::Unreachable) || !p1_status.connected {
+            return OverallHealthLevel::Critical;
+        }
+
+        // If Econ is unavailable, system is degraded (can't process fees)
+        if matches!(econ_status.health, EconHealthStatus::Unavailable) || !econ_status.operational {
+            return OverallHealthLevel::Degraded;
+        }
+
+        // If any component is degraded, overall is degraded
+        if matches!(dsn_state, DsnAvailabilityState::Degraded | DsnAvailabilityState::Recovering)
+            || matches!(p1_status.health, P1HealthStatus::Degraded | P1HealthStatus::Unhealthy)
+            || matches!(econ_status.health, EconHealthStatus::Degraded | EconHealthStatus::Limited)
+        {
+            return OverallHealthLevel::Degraded;
+        }
+
+        OverallHealthLevel::Healthy
+    }
+
+    /// Check if system can process high-consequence operations
+    pub fn can_process_high_consequence(&self) -> bool {
+        matches!(self.overall_health, OverallHealthLevel::Healthy)
+            && self.p1_status.connected
+            && self.econ_status.staking_available
+    }
+
+    /// Check if system can anchor to P1
+    pub fn can_anchor_to_p1(&self) -> bool {
+        self.p1_status.connected
+            && matches!(self.p1_status.health, P1HealthStatus::Healthy | P1HealthStatus::Degraded)
+    }
+
+    /// Check if economic operations are available
+    pub fn can_process_economic(&self) -> bool {
+        self.econ_status.operational
+            && matches!(self.econ_status.health, EconHealthStatus::Healthy | EconHealthStatus::Degraded)
+    }
+}
+
+/// Overall health level
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverallHealthLevel {
+    /// All systems healthy
+    Healthy,
+    /// Some systems degraded but operational
+    Degraded,
+    /// Critical - some operations blocked
+    Critical,
 }
 
 impl Default for DegradedModeState {
@@ -212,6 +429,8 @@ impl Default for DegradedModeState {
             last_health_check: now,
             consecutive_failures: 0,
             queued_operations: 0,
+            p1_status: P1ConnectionStatus::default(),
+            econ_status: EconSubsystemStatus::default(),
         }
     }
 }
@@ -468,6 +687,183 @@ impl DegradedModeManager {
     pub async fn update_policy(&self, policy: DegradedModePolicy) {
         *self.policy.write().await = policy;
     }
+
+    // ========== P1 and Econ Linkage Methods ==========
+
+    /// Update P1 connection status
+    pub async fn update_p1_status(&self, status: P1ConnectionStatus) {
+        let mut state = self.state.write().await;
+        let old_connected = state.p1_status.connected;
+        state.p1_status = status.clone();
+
+        // Auto-trigger degraded mode if P1 becomes unreachable
+        if old_connected && !status.connected {
+            if state.state == DsnAvailabilityState::Available {
+                state.state = DsnAvailabilityState::Degraded;
+                state.state_started_at = Utc::now();
+                state.reason = "P1 connection lost".to_string();
+                self.is_degraded.store(true, Ordering::Release);
+                tracing::warn!("Entering degraded mode due to P1 connection loss");
+            }
+        }
+    }
+
+    /// Update Econ subsystem status
+    pub async fn update_econ_status(&self, status: EconSubsystemStatus) {
+        let mut state = self.state.write().await;
+        let old_operational = state.econ_status.operational;
+        state.econ_status = status.clone();
+
+        // Auto-trigger degraded mode if Econ becomes unavailable
+        if old_operational && !status.operational {
+            if state.state == DsnAvailabilityState::Available {
+                state.state = DsnAvailabilityState::Degraded;
+                state.state_started_at = Utc::now();
+                state.reason = "Econ subsystem unavailable".to_string();
+                self.is_degraded.store(true, Ordering::Release);
+                tracing::warn!("Entering degraded mode due to Econ subsystem unavailability");
+            }
+        }
+    }
+
+    /// Get combined system health status
+    pub async fn get_system_health(&self) -> SystemHealthStatus {
+        let state = self.state.read().await;
+        SystemHealthStatus::calculate(
+            state.state,
+            &state.p1_status,
+            &state.econ_status,
+        )
+    }
+
+    /// Check if high-consequence operations are allowed
+    pub async fn can_high_consequence(&self) -> bool {
+        let health = self.get_system_health().await;
+        health.can_process_high_consequence()
+    }
+
+    /// Check if P1 anchoring is available
+    pub async fn can_anchor_p1(&self) -> bool {
+        let health = self.get_system_health().await;
+        health.can_anchor_to_p1()
+    }
+
+    /// Check if economic operations are available
+    pub async fn can_economic(&self) -> bool {
+        let health = self.get_system_health().await;
+        health.can_process_economic()
+    }
+
+    /// Check operation considering all system health factors
+    pub async fn check_operation_full(&self, operation: OperationType) -> DegradedModeResult<OperationCheckResult> {
+        let health = self.get_system_health().await;
+
+        // High-consequence operations need full system health
+        if operation.is_high_consequence() && !health.can_process_high_consequence() {
+            return Err(DegradedModeError::OperationSuspended(
+                format!("{:?} requires full system health (P1 connected, Econ available)", operation)
+            ));
+        }
+
+        // Operations requiring P1 anchoring
+        if operation.requires_full_dsn() && !health.can_anchor_to_p1() {
+            return Err(DegradedModeError::OperationSuspended(
+                format!("{:?} requires P1 connectivity for anchoring", operation)
+            ));
+        }
+
+        // Check DSN-specific restrictions
+        let dsn_check = self.check_operation(operation).await?;
+
+        Ok(OperationCheckResult {
+            operation,
+            check: dsn_check,
+            system_health: health,
+            restrictions: self.get_active_restrictions(&operation).await,
+        })
+    }
+
+    /// Get active restrictions for an operation
+    async fn get_active_restrictions(&self, operation: &OperationType) -> Vec<OperationRestriction> {
+        let health = self.get_system_health().await;
+        let mut restrictions = Vec::new();
+
+        if matches!(health.overall_health, OverallHealthLevel::Critical) {
+            restrictions.push(OperationRestriction::SystemCritical);
+        }
+
+        if !health.p1_status.connected {
+            restrictions.push(OperationRestriction::P1Unavailable);
+        }
+
+        if !health.econ_status.operational {
+            restrictions.push(OperationRestriction::EconUnavailable);
+        }
+
+        if matches!(health.dsn_state, DsnAvailabilityState::Degraded | DsnAvailabilityState::Unavailable) {
+            restrictions.push(OperationRestriction::DsnDegraded);
+        }
+
+        if operation.is_high_consequence() && !health.econ_status.staking_available {
+            restrictions.push(OperationRestriction::StakingRequired);
+        }
+
+        restrictions
+    }
+}
+
+/// Full operation check result with system health context
+#[derive(Debug, Clone)]
+pub struct OperationCheckResult {
+    /// Operation being checked
+    pub operation: OperationType,
+    /// Basic DSN check result
+    pub check: OperationCheck,
+    /// Current system health
+    pub system_health: SystemHealthStatus,
+    /// Active restrictions
+    pub restrictions: Vec<OperationRestriction>,
+}
+
+impl OperationCheckResult {
+    /// Check if operation is fully allowed without restrictions
+    pub fn is_fully_allowed(&self) -> bool {
+        self.check.is_allowed() && self.restrictions.is_empty()
+    }
+
+    /// Check if operation is allowed (possibly with restrictions)
+    pub fn is_allowed(&self) -> bool {
+        self.check.is_allowed()
+    }
+
+    /// Get human-readable summary
+    pub fn summary(&self) -> String {
+        if self.is_fully_allowed() {
+            format!("{:?}: Allowed", self.operation)
+        } else if self.is_allowed() {
+            format!("{:?}: Allowed with restrictions: {:?}", self.operation, self.restrictions)
+        } else {
+            format!("{:?}: Blocked, restrictions: {:?}", self.operation, self.restrictions)
+        }
+    }
+}
+
+/// Operation restrictions
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationRestriction {
+    /// System in critical state
+    SystemCritical,
+    /// P1 (L0) unavailable
+    P1Unavailable,
+    /// Econ subsystem unavailable
+    EconUnavailable,
+    /// DSN (P2) degraded
+    DsnDegraded,
+    /// Staking required but unavailable
+    StakingRequired,
+    /// Consent required
+    ConsentRequired,
 }
 
 impl Default for DegradedModeManager {
@@ -531,7 +927,269 @@ pub enum DegradedModeEventType {
     RecoveryStarted,
     /// Recovery completed
     RecoveryCompleted,
+    /// Ticket replay started
+    TicketReplayStarted,
+    /// Ticket replay completed
+    TicketReplayCompleted,
 }
+
+// ============================================================================
+// Ticket Replay System (问题11)
+// ============================================================================
+
+/// Ticket operation recorded during degraded mode
+///
+/// When operating in degraded mode, ticket operations that couldn't be
+/// fully verified against P1 are recorded for later replay/reconciliation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DegradedModeTicketOperation {
+    /// Operation ID
+    pub operation_id: String,
+    /// Ticket ID
+    pub ticket_id: String,
+    /// Operation type
+    pub operation_type: TicketOperationType,
+    /// Actor who performed the operation
+    pub actor: String,
+    /// Target resource
+    pub target_resource: String,
+    /// Operation timestamp
+    pub timestamp: DateTime<Utc>,
+    /// Consent used
+    pub consent_used: bool,
+    /// Operation details digest (for verification)
+    pub details_digest: Digest,
+    /// Replay status
+    pub replay_status: TicketReplayStatus,
+    /// Local validation passed
+    pub local_validation_passed: bool,
+}
+
+/// Ticket operation type during degraded mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TicketOperationType {
+    /// Ticket issued
+    Issue,
+    /// Ticket used for access
+    Use,
+    /// Ticket revoked
+    Revoke,
+    /// Ticket refreshed
+    Refresh,
+}
+
+/// Ticket replay status
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TicketReplayStatus {
+    /// Pending replay
+    Pending,
+    /// Currently being replayed
+    InProgress,
+    /// Replay successful - operation reconciled
+    Reconciled,
+    /// Replay failed - conflict detected
+    Conflict,
+    /// Replay skipped - not needed
+    Skipped,
+}
+
+/// Ticket replay result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TicketReplayResult {
+    /// Total operations to replay
+    pub total_operations: u32,
+    /// Successfully reconciled
+    pub reconciled: u32,
+    /// Conflicts detected
+    pub conflicts: u32,
+    /// Skipped (not needed)
+    pub skipped: u32,
+    /// Failed operations
+    pub failed: u32,
+    /// Conflict details
+    pub conflict_details: Vec<TicketConflict>,
+    /// Replay started at
+    pub started_at: DateTime<Utc>,
+    /// Replay completed at
+    pub completed_at: Option<DateTime<Utc>>,
+    /// Replay duration (ms)
+    pub duration_ms: Option<i64>,
+}
+
+impl TicketReplayResult {
+    /// Create a new replay result
+    pub fn new(total_operations: u32) -> Self {
+        Self {
+            total_operations,
+            reconciled: 0,
+            conflicts: 0,
+            skipped: 0,
+            failed: 0,
+            conflict_details: Vec::new(),
+            started_at: Utc::now(),
+            completed_at: None,
+            duration_ms: None,
+        }
+    }
+
+    /// Mark as completed
+    pub fn complete(&mut self) {
+        self.completed_at = Some(Utc::now());
+        self.duration_ms = Some((Utc::now() - self.started_at).num_milliseconds());
+    }
+
+    /// Check if replay was successful (no conflicts or failures)
+    pub fn is_successful(&self) -> bool {
+        self.conflicts == 0 && self.failed == 0
+    }
+
+    /// Get success rate
+    pub fn success_rate(&self) -> f64 {
+        if self.total_operations == 0 {
+            return 1.0;
+        }
+        (self.reconciled + self.skipped) as f64 / self.total_operations as f64
+    }
+}
+
+/// Ticket conflict during replay
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TicketConflict {
+    /// Operation ID
+    pub operation_id: String,
+    /// Ticket ID
+    pub ticket_id: String,
+    /// Conflict type
+    pub conflict_type: TicketConflictType,
+    /// Description
+    pub description: String,
+    /// Resolution strategy
+    pub resolution: Option<TicketConflictResolution>,
+}
+
+/// Types of ticket conflicts
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TicketConflictType {
+    /// Ticket was revoked on P1 during degraded mode
+    RevokedOnP1,
+    /// Ticket expired during degraded mode
+    Expired,
+    /// Usage count exceeded
+    UsageExceeded,
+    /// Consent was withdrawn
+    ConsentWithdrawn,
+    /// Resource was modified
+    ResourceModified,
+    /// P1 state doesn't match local state
+    StateMismatch,
+}
+
+/// Conflict resolution strategies
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TicketConflictResolution {
+    /// Accept local operation (degraded mode wins)
+    AcceptLocal,
+    /// Accept P1 state (P1 wins)
+    AcceptP1,
+    /// Require manual resolution
+    ManualResolution,
+    /// Compensate (undo local operation)
+    Compensate,
+}
+
+/// Ticket replay queue
+#[derive(Debug, Default)]
+pub struct TicketReplayQueue {
+    /// Queued operations
+    operations: Vec<DegradedModeTicketOperation>,
+    /// Queue locked (replay in progress)
+    locked: bool,
+}
+
+impl TicketReplayQueue {
+    /// Create a new replay queue
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add operation to queue
+    pub fn enqueue(&mut self, operation: DegradedModeTicketOperation) {
+        if !self.locked {
+            self.operations.push(operation);
+        }
+    }
+
+    /// Get pending operations count
+    pub fn pending_count(&self) -> usize {
+        self.operations.iter()
+            .filter(|op| matches!(op.replay_status, TicketReplayStatus::Pending))
+            .count()
+    }
+
+    /// Lock queue for replay
+    pub fn lock(&mut self) {
+        self.locked = true;
+    }
+
+    /// Unlock queue
+    pub fn unlock(&mut self) {
+        self.locked = false;
+    }
+
+    /// Clear completed operations
+    pub fn clear_completed(&mut self) {
+        self.operations.retain(|op| {
+            matches!(op.replay_status, TicketReplayStatus::Pending | TicketReplayStatus::InProgress)
+        });
+    }
+
+    /// Get all operations for replay
+    pub fn get_pending_operations(&self) -> Vec<&DegradedModeTicketOperation> {
+        self.operations.iter()
+            .filter(|op| matches!(op.replay_status, TicketReplayStatus::Pending))
+            .collect()
+    }
+
+    /// Update operation status
+    pub fn update_status(&mut self, operation_id: &str, status: TicketReplayStatus) {
+        if let Some(op) = self.operations.iter_mut().find(|op| op.operation_id == operation_id) {
+            op.replay_status = status;
+        }
+    }
+}
+
+/// Ticket replay configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TicketReplayConfig {
+    /// Auto-replay on recovery
+    pub auto_replay: bool,
+    /// Maximum replay batch size
+    pub max_batch_size: u32,
+    /// Conflict resolution strategy
+    pub default_resolution: TicketConflictResolution,
+    /// Require manual approval for conflicts
+    pub require_manual_conflict_approval: bool,
+    /// Replay timeout (seconds)
+    pub replay_timeout_seconds: u32,
+}
+
+impl Default for TicketReplayConfig {
+    fn default() -> Self {
+        Self {
+            auto_replay: true,
+            max_batch_size: 100,
+            default_resolution: TicketConflictResolution::AcceptP1,
+            require_manual_conflict_approval: true,
+            replay_timeout_seconds: 300, // 5 minutes
+        }
+    }
+}
+
+use l0_core::types::Digest;
 
 #[cfg(test)]
 mod tests {

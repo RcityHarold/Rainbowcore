@@ -20,7 +20,7 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use l0_core::types::{Digest, Receipt};
+use l0_core::types::{Digest, L0Receipt as Receipt};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -844,13 +844,32 @@ mod tests {
         );
 
         // Add L0 receipt (not third-party)
+        let test_receipt = Receipt {
+            receipt_id: l0_core::types::ReceiptId("test-receipt".to_string()),
+            scope_type: l0_core::types::ScopeType::BackfillBatch,
+            root_kind: l0_core::types::RootKind::BatchRoot,
+            root: Digest::zero(),
+            time_window_start: Utc::now(),
+            time_window_end: Utc::now(),
+            batch_sequence_no: Some(1),
+            signer_set_version: "v1".to_string(),
+            canonicalization_version: "v1".to_string(),
+            anchor_policy_version: "v1".to_string(),
+            fee_schedule_version: "v1".to_string(),
+            fee_receipt_id: "fee-1".to_string(),
+            signed_snapshot_ref: "snapshot-1".to_string(),
+            created_at: Utc::now(),
+            rejected: None,
+            reject_reason_code: None,
+            observer_reports_digest: None,
+        };
         evidence.add_anchor(VerificationAnchor {
             anchor_id: "anchor:1".to_string(),
             anchor_type: AnchorType::L0Receipt,
             created_at: Utc::now(),
             expires_at: None,
             anchor_data: AnchorData::L0Receipt {
-                receipt: Receipt::default(),
+                receipt: test_receipt,
                 block_height: 100,
                 tx_hash: Digest::zero(),
             },

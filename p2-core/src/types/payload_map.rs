@@ -1,14 +1,31 @@
-//! Payload Map Commit Types
+//! Payload Map Commit Types (Canonical Implementation)
 //!
 //! This module implements the complete payload_map_commit system as defined
 //! in DSN documentation Chapter 3 - 映射承诺体系.
 //!
-//! The three types of MapCommit:
+//! # The Three Types of MapCommit
+//!
+//! Per DSN documentation, there are three distinct commit types:
 //! - **BatchMapCommit**: Main path for batch synchronization (主路)
 //! - **SnapshotMapCommit**: Minimum guarantee for snapshots (最低保)
 //! - **ACMapCommit**: Special case for AC sequence (特例)
 //!
-//! HARD INVARIANT: Missing payload_map_commit MUST result in B-level evidence.
+//! Use the unified `MapCommit` enum for storage and polymorphic operations.
+//!
+//! # Module Relationship
+//!
+//! This is the **canonical implementation** with full features:
+//! - `PayloadMap`: Full payload mapping structure
+//! - `MapCommit`: Unified enum for all commit types
+//! - Verification, integrity checking, etc.
+//!
+//! The `bridge` crate has simplified types for three-phase sync operations.
+//! When in doubt, use this module's types.
+//!
+//! # HARD INVARIANT
+//!
+//! **Missing payload_map_commit MUST result in B-level evidence.**
+//! This is a non-negotiable protocol requirement.
 
 use chrono::{DateTime, Utc};
 use l0_core::types::{ActorId, Digest, ReceiptId};
@@ -115,10 +132,13 @@ impl PayloadMap {
     pub fn tombstone_entry(&mut self, object_ref: &str) -> Option<PayloadMapEntry> {
         if let Some(entry) = self.entries.get_mut(object_ref) {
             entry.status = PayloadMapEntryStatus::Tombstoned;
+            let cloned_entry = entry.clone();
+            // Drop the mutable borrow before calling recompute_digest
+            drop(entry);
             self.modified_at = Utc::now();
             self.version += 1;
             self.recompute_digest();
-            Some(entry.clone())
+            Some(cloned_entry)
         } else {
             None
         }

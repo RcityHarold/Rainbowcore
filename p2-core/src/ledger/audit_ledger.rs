@@ -607,6 +607,80 @@ impl AuditLedger for FileAuditLedger {
 
         Ok(logs)
     }
+
+    async fn get_stats(&self) -> P2Result<super::traits::AuditStats> {
+        let cache = self.index_cache.read().await;
+
+        let mut stats = super::traits::AuditStats {
+            total_entries: cache.len(),
+            decrypt_count: 0,
+            export_count: 0,
+            sampling_count: 0,
+            ticket_count: 0,
+            failed_count: 0,
+            oldest_timestamp: None,
+            newest_timestamp: None,
+        };
+
+        for entry in cache.values() {
+            // Count by type
+            match entry.log_type {
+                AuditLogType::Decrypt => stats.decrypt_count += 1,
+                AuditLogType::Export => stats.export_count += 1,
+                AuditLogType::Sampling => stats.sampling_count += 1,
+                AuditLogType::Ticket => stats.ticket_count += 1,
+            }
+
+            // Count failures
+            if entry.is_failed {
+                stats.failed_count += 1;
+            }
+
+            // Track oldest and newest timestamps
+            if stats.oldest_timestamp.is_none() || entry.timestamp < stats.oldest_timestamp.unwrap() {
+                stats.oldest_timestamp = Some(entry.timestamp);
+            }
+            if stats.newest_timestamp.is_none() || entry.timestamp > stats.newest_timestamp.unwrap() {
+                stats.newest_timestamp = Some(entry.timestamp);
+            }
+        }
+
+        Ok(stats)
+    }
+
+    async fn get_export_logs_by_actor(
+        &self,
+        actor_id: &ActorId,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> P2Result<Vec<ExportAuditLog>> {
+        let entries = {
+            let cache = self.index_cache.read().await;
+
+            cache
+                .values()
+                .filter(|e| {
+                    matches!(e.log_type, AuditLogType::Export)
+                        && e.actor_id.as_deref() == Some(&actor_id.0)
+                        && e.timestamp >= from
+                        && e.timestamp <= to
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+
+        let mut logs = Vec::new();
+        for entry in entries {
+            if let Some(log) = self.read_export_log(&entry.log_id).await? {
+                logs.push(log);
+            }
+        }
+
+        // Sort by timestamp
+        logs.sort_by(|a, b| a.exported_at.cmp(&b.exported_at));
+
+        Ok(logs)
+    }
 }
 
 #[cfg(test)]

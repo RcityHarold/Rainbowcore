@@ -16,7 +16,7 @@ use std::sync::Arc;
 use bridge::L0CommitClient;
 #[cfg(test)]
 use bridge::MockL0Client;
-use p2_core::ledger::{FileAuditLedger, FileEvidenceLedger, FileSyncLedger, FileTicketLedger};
+use p2_core::ledger::{FileAuditLedger, FileEvidenceLedger, FileSnapshotLedger, FileSyncLedger, FileTicketLedger};
 use p2_storage::LocalStorageBackend;
 
 /// Application state
@@ -32,6 +32,8 @@ pub struct AppState {
     pub audit_ledger: Arc<FileAuditLedger>,
     /// Sync state ledger
     pub sync_ledger: Arc<FileSyncLedger>,
+    /// Snapshot ledger (R0/R1 resurrection snapshots)
+    pub snapshot_ledger: Arc<FileSnapshotLedger>,
     /// L0 commit client
     pub l0_client: Arc<dyn L0CommitClient>,
 }
@@ -95,6 +97,9 @@ impl AppState {
         let sync_ledger = Arc::new(
             FileSyncLedger::new(format!("{}/sync", ledger_path)).await?,
         );
+        let snapshot_ledger = Arc::new(
+            FileSnapshotLedger::new(format!("{}/snapshots", ledger_path)).await?,
+        );
 
         Ok(Self {
             storage,
@@ -102,6 +107,7 @@ impl AppState {
             ticket_ledger,
             audit_ledger,
             sync_ledger,
+            snapshot_ledger,
             l0_client,
         })
     }
@@ -158,6 +164,8 @@ impl AppState {
             .block_on(FileAuditLedger::new(format!("{}/audit", ledger_path)))?;
         let sync_ledger = rt
             .block_on(FileSyncLedger::new(format!("{}/sync", ledger_path)))?;
+        let snapshot_ledger = rt
+            .block_on(FileSnapshotLedger::new(format!("{}/snapshots", ledger_path)))?;
 
         Ok(Self {
             storage,
@@ -165,6 +173,7 @@ impl AppState {
             ticket_ledger: Arc::new(ticket_ledger),
             audit_ledger: Arc::new(audit_ledger),
             sync_ledger: Arc::new(sync_ledger),
+            snapshot_ledger: Arc::new(snapshot_ledger),
             l0_client,
         })
     }
@@ -190,6 +199,7 @@ impl AppState {
         ticket_ledger: Arc<FileTicketLedger>,
         audit_ledger: Arc<FileAuditLedger>,
         sync_ledger: Arc<FileSyncLedger>,
+        snapshot_ledger: Arc<FileSnapshotLedger>,
         l0_client: Arc<dyn L0CommitClient>,
     ) -> Self {
         Self {
@@ -198,6 +208,7 @@ impl AppState {
             ticket_ledger,
             audit_ledger,
             sync_ledger,
+            snapshot_ledger,
             l0_client,
         }
     }

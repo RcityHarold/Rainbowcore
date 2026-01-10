@@ -9,8 +9,8 @@
 //! reconciled, while B-level indicates some aspect is missing or unverified.
 
 use chrono::{DateTime, Utc};
-use l0_core::types::{Digest, L0Receipt, ReceiptId, ReceiptVerifyResult};
-use p2_core::types::{EvidenceLevel, SealedPayloadRef};
+use l0_core::types::{Digest, EvidenceLevel, L0Receipt, ReceiptId, ReceiptVerifyResult};
+use p2_core::types::SealedPayloadRef;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{BridgeError, BridgeResult};

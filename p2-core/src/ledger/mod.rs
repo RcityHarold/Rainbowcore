@@ -24,7 +24,7 @@ pub mod ticket_ledger;
 pub mod wal;
 
 pub use traits::{
-    AuditLedger, EvidenceLedger, PayloadMetadata, PayloadStore, SnapshotLedger, TicketLedger,
+    AuditLedger, AuditStats, EvidenceLedger, PayloadMetadata, PayloadStore, SnapshotLedger, TicketLedger,
 };
 
 pub use audit_ledger::FileAuditLedger;

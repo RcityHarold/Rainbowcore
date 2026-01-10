@@ -217,6 +217,257 @@ impl SelectorValidation {
     }
 }
 
+// ============================================================================
+// Selector Audit Replay (问题13)
+// ============================================================================
+
+use chrono::{DateTime, Utc};
+use l0_core::types::{ActorId, Digest};
+
+/// Selector operation record for audit replay
+///
+/// Every selector operation is recorded for potential audit replay.
+/// This supports forensic investigation and compliance verification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelectorOperationRecord {
+    /// Record ID
+    pub record_id: String,
+    /// Ticket ID that authorized this operation
+    pub ticket_id: String,
+    /// Selector used
+    pub selector: PayloadSelector,
+    /// Target payload reference
+    pub target_payload_ref: String,
+    /// Actor who performed the operation
+    pub actor: ActorId,
+    /// Operation timestamp
+    pub timestamp: DateTime<Utc>,
+    /// Input digest (before selection)
+    pub input_digest: Digest,
+    /// Output digest (after selection)
+    pub output_digest: Digest,
+    /// Bytes accessed
+    pub bytes_accessed: u64,
+    /// Operation result
+    pub result: SelectorOperationResult,
+    /// Additional metadata digest
+    pub metadata_digest: Option<Digest>,
+}
+
+impl SelectorOperationRecord {
+    /// Create a new operation record
+    pub fn new(
+        record_id: String,
+        ticket_id: String,
+        selector: PayloadSelector,
+        target_payload_ref: String,
+        actor: ActorId,
+        input_digest: Digest,
+        output_digest: Digest,
+        bytes_accessed: u64,
+    ) -> Self {
+        Self {
+            record_id,
+            ticket_id,
+            selector,
+            target_payload_ref,
+            actor,
+            timestamp: Utc::now(),
+            input_digest,
+            output_digest,
+            bytes_accessed,
+            result: SelectorOperationResult::Success,
+            metadata_digest: None,
+        }
+    }
+
+    /// Create record for failed operation
+    pub fn failed(
+        record_id: String,
+        ticket_id: String,
+        selector: PayloadSelector,
+        target_payload_ref: String,
+        actor: ActorId,
+        error: SelectorOperationError,
+    ) -> Self {
+        Self {
+            record_id,
+            ticket_id,
+            selector,
+            target_payload_ref,
+            actor,
+            timestamp: Utc::now(),
+            input_digest: Digest::zero(),
+            output_digest: Digest::zero(),
+            bytes_accessed: 0,
+            result: SelectorOperationResult::Failed(error),
+            metadata_digest: None,
+        }
+    }
+
+    /// Compute verification digest for this record
+    pub fn compute_verification_digest(&self) -> Digest {
+        let mut data = Vec::new();
+        data.extend_from_slice(self.record_id.as_bytes());
+        data.extend_from_slice(self.ticket_id.as_bytes());
+        data.extend_from_slice(self.target_payload_ref.as_bytes());
+        data.extend_from_slice(self.input_digest.as_bytes());
+        data.extend_from_slice(self.output_digest.as_bytes());
+        data.extend_from_slice(&self.timestamp.timestamp().to_le_bytes());
+        Digest::blake3(&data)
+    }
+}
+
+/// Selector operation result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SelectorOperationResult {
+    /// Operation succeeded
+    Success,
+    /// Operation failed
+    Failed(SelectorOperationError),
+}
+
+/// Selector operation error
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SelectorOperationError {
+    /// Selector expression invalid
+    InvalidSelector(String),
+    /// Selector exceeds ticket scope
+    ExceedsScope,
+    /// Payload not found
+    PayloadNotFound,
+    /// Payload inaccessible
+    PayloadInaccessible,
+    /// Decryption failed
+    DecryptionFailed,
+    /// Ticket invalid
+    TicketInvalid,
+    /// Internal error
+    InternalError(String),
+}
+
+/// Selector audit replay request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelectorReplayRequest {
+    /// Replay request ID
+    pub request_id: String,
+    /// Original operation record ID
+    pub original_record_id: String,
+    /// Requestor
+    pub requestor: ActorId,
+    /// Replay purpose
+    pub purpose: ReplayPurpose,
+    /// Request timestamp
+    pub requested_at: DateTime<Utc>,
+    /// Authorization reference (audit mandate, court order, etc.)
+    pub authorization_ref: String,
+}
+
+/// Purpose of audit replay
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayPurpose {
+    /// Forensic investigation
+    ForensicInvestigation,
+    /// Compliance verification
+    ComplianceVerification,
+    /// Dispute resolution
+    DisputeResolution,
+    /// Security audit
+    SecurityAudit,
+    /// Data integrity check
+    DataIntegrityCheck,
+}
+
+/// Selector replay result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelectorReplayResult {
+    /// Replay result ID
+    pub result_id: String,
+    /// Original record ID
+    pub original_record_id: String,
+    /// Replay request ID
+    pub request_id: String,
+    /// Replay status
+    pub status: ReplayStatus,
+    /// Output matches original
+    pub output_matches: bool,
+    /// Original output digest
+    pub original_output_digest: Digest,
+    /// Replayed output digest
+    pub replayed_output_digest: Digest,
+    /// Replay timestamp
+    pub replayed_at: DateTime<Utc>,
+    /// Discrepancies found (if any)
+    pub discrepancies: Vec<ReplayDiscrepancy>,
+    /// Verifier signature
+    pub verifier_id: String,
+}
+
+impl SelectorReplayResult {
+    /// Check if replay was successful and output matches
+    pub fn is_verified(&self) -> bool {
+        matches!(self.status, ReplayStatus::Completed) && self.output_matches
+    }
+}
+
+/// Replay status
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayStatus {
+    /// Replay pending
+    Pending,
+    /// Replay in progress
+    InProgress,
+    /// Replay completed
+    Completed,
+    /// Replay failed
+    Failed,
+    /// Replay not possible (data unavailable)
+    DataUnavailable,
+}
+
+/// Discrepancy found during replay
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplayDiscrepancy {
+    /// Discrepancy type
+    pub discrepancy_type: DiscrepancyType,
+    /// Description
+    pub description: String,
+    /// Severity
+    pub severity: DiscrepancySeverity,
+}
+
+/// Types of discrepancies
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscrepancyType {
+    /// Output digest mismatch
+    OutputMismatch,
+    /// Bytes accessed differs
+    ByteCountDiffers,
+    /// Selector interpretation differs
+    SelectorInterpretation,
+    /// Timestamp anomaly
+    TimestampAnomaly,
+    /// Missing metadata
+    MissingMetadata,
+}
+
+/// Discrepancy severity
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscrepancySeverity {
+    /// Low - minor difference, likely acceptable
+    Low,
+    /// Medium - notable difference, requires review
+    Medium,
+    /// High - significant difference, likely issue
+    High,
+    /// Critical - major discrepancy, integrity concern
+    Critical,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

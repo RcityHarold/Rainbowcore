@@ -2,6 +2,24 @@
 //!
 //! Audit logging for P2 operations - decrypt, export, and sampling.
 //! All payload access MUST generate an audit log entry.
+//!
+//! # HARD RULE: Mandatory Audit Logging
+//!
+//! Per DSN documentation, audit logging is **NOT optional**:
+//!
+//! 1. **Decrypt operations**: MUST write `DecryptAuditLog` BEFORE decryption
+//! 2. **Export operations**: MUST write `ExportAuditLog` BEFORE export
+//! 3. **Ticket operations**: MUST write `TicketAuditLog` for all lifecycle events
+//!
+//! If audit log write fails, the operation MUST be blocked. This is enforced
+//! by the `MandatoryAuditGuard` which wraps all sensitive operations.
+//!
+//! # Error Handling
+//!
+//! When audit write fails:
+//! - `DecryptOutcome::AuditWriteFailed` is returned
+//! - The actual decrypt/export operation is NOT performed
+//! - The failure is logged at ERROR level
 
 use super::selector::PayloadSelector;
 use chrono::{DateTime, Utc};
@@ -639,6 +657,327 @@ pub struct AuditSummary {
     pub top_accessed_payloads: Vec<(String, u64)>,
 }
 
+// ============================================================================
+// Mandatory Audit Enforcement
+// ============================================================================
+
+/// Audit write result
+#[derive(Debug, Clone)]
+pub enum AuditWriteResult {
+    /// Audit log written successfully
+    Success { log_id: String },
+    /// Audit write failed
+    Failed { error: AuditWriteError },
+}
+
+impl AuditWriteResult {
+    /// Check if write was successful
+    pub fn is_success(&self) -> bool {
+        matches!(self, AuditWriteResult::Success { .. })
+    }
+
+    /// Get log ID if successful
+    pub fn log_id(&self) -> Option<&str> {
+        match self {
+            AuditWriteResult::Success { log_id } => Some(log_id),
+            _ => None,
+        }
+    }
+}
+
+/// Audit write error
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditWriteError {
+    /// Error code
+    pub code: AuditErrorCode,
+    /// Error message
+    pub message: String,
+    /// Timestamp
+    pub timestamp: DateTime<Utc>,
+    /// Retry allowed
+    pub retry_allowed: bool,
+}
+
+impl AuditWriteError {
+    /// Create a new audit write error
+    pub fn new(code: AuditErrorCode, message: &str) -> Self {
+        Self {
+            code,
+            message: message.to_string(),
+            timestamp: Utc::now(),
+            retry_allowed: matches!(code, AuditErrorCode::StorageUnavailable | AuditErrorCode::Timeout),
+        }
+    }
+}
+
+impl std::fmt::Display for AuditWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "AuditWriteError({:?}): {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for AuditWriteError {}
+
+/// Audit error codes
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditErrorCode {
+    /// Storage backend unavailable
+    StorageUnavailable,
+    /// Write timeout
+    Timeout,
+    /// Invalid audit data
+    InvalidData,
+    /// Duplicate log ID
+    DuplicateLogId,
+    /// Quota exceeded
+    QuotaExceeded,
+    /// Internal error
+    InternalError,
+}
+
+/// Mandatory Audit Guard - Ensures audit is written before operation
+///
+/// # HARD RULE
+///
+/// This guard enforces that audit logs are written BEFORE any sensitive
+/// operation is performed. The operation cannot proceed without a successful
+/// audit write.
+///
+/// # Usage
+///
+/// ```rust,ignore
+/// // Create guard - this writes the audit log
+/// let guard = MandatoryAuditGuard::new_decrypt(audit_log, writer).await?;
+///
+/// // Only after guard is successfully created can you perform the operation
+/// let result = perform_decrypt(...);
+///
+/// // Update the guard with the result
+/// guard.complete_with_result(result).await?;
+/// ```
+#[derive(Debug)]
+pub struct MandatoryAuditGuard {
+    /// Audit log ID
+    log_id: String,
+    /// Operation type
+    operation_type: MandatoryAuditOperation,
+    /// Guard state
+    state: AuditGuardState,
+    /// Created timestamp
+    created_at: DateTime<Utc>,
+}
+
+/// Audit guard state
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuditGuardState {
+    /// Audit written, operation pending
+    Pending,
+    /// Operation completed successfully
+    Completed,
+    /// Operation failed
+    Failed,
+    /// Guard abandoned (operation not completed)
+    Abandoned,
+}
+
+/// Mandatory audit operation types
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MandatoryAuditOperation {
+    /// Decrypt operation
+    Decrypt,
+    /// Export operation
+    Export,
+    /// Ticket issuance
+    TicketIssue,
+    /// Ticket usage
+    TicketUse,
+    /// Ticket revocation
+    TicketRevoke,
+}
+
+impl MandatoryAuditGuard {
+    /// Create a new audit guard with pre-written log
+    ///
+    /// The audit log MUST already be written successfully before calling this.
+    /// This function just wraps the log ID and tracks completion.
+    pub fn from_written_log(log_id: String, operation_type: MandatoryAuditOperation) -> Self {
+        Self {
+            log_id,
+            operation_type,
+            state: AuditGuardState::Pending,
+            created_at: Utc::now(),
+        }
+    }
+
+    /// Get the log ID
+    pub fn log_id(&self) -> &str {
+        &self.log_id
+    }
+
+    /// Get the operation type
+    pub fn operation_type(&self) -> MandatoryAuditOperation {
+        self.operation_type
+    }
+
+    /// Get the guard state
+    pub fn state(&self) -> AuditGuardState {
+        self.state
+    }
+
+    /// Mark operation as completed successfully
+    pub fn mark_completed(&mut self) {
+        if self.state == AuditGuardState::Pending {
+            self.state = AuditGuardState::Completed;
+        }
+    }
+
+    /// Mark operation as failed
+    pub fn mark_failed(&mut self) {
+        if self.state == AuditGuardState::Pending {
+            self.state = AuditGuardState::Failed;
+        }
+    }
+
+    /// Check if operation can proceed
+    ///
+    /// Returns true only if the audit was written and operation is pending
+    pub fn can_proceed(&self) -> bool {
+        self.state == AuditGuardState::Pending
+    }
+
+    /// Get duration since guard creation
+    pub fn duration_ms(&self) -> i64 {
+        (Utc::now() - self.created_at).num_milliseconds()
+    }
+}
+
+impl Drop for MandatoryAuditGuard {
+    fn drop(&mut self) {
+        // If guard is dropped while still pending, log a warning
+        if self.state == AuditGuardState::Pending {
+            self.state = AuditGuardState::Abandoned;
+            tracing::warn!(
+                log_id = %self.log_id,
+                operation_type = ?self.operation_type,
+                "MandatoryAuditGuard dropped while operation still pending - audit may be incomplete"
+            );
+        }
+    }
+}
+
+/// Trait for audit log writers
+///
+/// Implementations MUST ensure durability before returning success.
+/// A successful write means the log is guaranteed to be persisted.
+#[async_trait::async_trait]
+pub trait AuditLogWriter: Send + Sync {
+    /// Write a decrypt audit log
+    ///
+    /// MUST be called BEFORE the actual decrypt operation.
+    async fn write_decrypt_log(&self, log: &DecryptAuditLog) -> AuditWriteResult;
+
+    /// Write an export audit log
+    ///
+    /// MUST be called BEFORE the actual export operation.
+    async fn write_export_log(&self, log: &ExportAuditLog) -> AuditWriteResult;
+
+    /// Write a ticket audit log
+    ///
+    /// MUST be called for all ticket lifecycle events.
+    async fn write_ticket_log(&self, log: &TicketAuditLog) -> AuditWriteResult;
+
+    /// Write a sampling artifact
+    async fn write_sampling_artifact(&self, artifact: &SamplingArtifact) -> AuditWriteResult;
+
+    /// Update an existing log (e.g., to add outcome after operation)
+    async fn update_log_outcome(&self, log_id: &str, outcome: &str) -> AuditWriteResult;
+}
+
+/// Helper function to create a mandatory audit guard for decrypt operations
+///
+/// This is the recommended way to ensure audit compliance:
+///
+/// ```rust,ignore
+/// let guard = create_decrypt_audit_guard(
+///     audit_log,
+///     &audit_writer,
+/// ).await?;
+///
+/// // Audit is now written - safe to proceed
+/// let result = decrypt_payload(...);
+///
+/// guard.mark_completed(); // or mark_failed()
+/// ```
+pub async fn create_decrypt_audit_guard<W: AuditLogWriter>(
+    log: &DecryptAuditLog,
+    writer: &W,
+) -> Result<MandatoryAuditGuard, AuditWriteError> {
+    match writer.write_decrypt_log(log).await {
+        AuditWriteResult::Success { log_id } => {
+            Ok(MandatoryAuditGuard::from_written_log(log_id, MandatoryAuditOperation::Decrypt))
+        }
+        AuditWriteResult::Failed { error } => {
+            tracing::error!(
+                ticket_ref = %log.ticket_ref,
+                target_payload = %log.target_payload_ref,
+                error = %error,
+                "MANDATORY AUDIT WRITE FAILED - blocking decrypt operation"
+            );
+            Err(error)
+        }
+    }
+}
+
+/// Helper function to create a mandatory audit guard for export operations
+pub async fn create_export_audit_guard<W: AuditLogWriter>(
+    log: &ExportAuditLog,
+    writer: &W,
+) -> Result<MandatoryAuditGuard, AuditWriteError> {
+    match writer.write_export_log(log).await {
+        AuditWriteResult::Success { log_id } => {
+            Ok(MandatoryAuditGuard::from_written_log(log_id, MandatoryAuditOperation::Export))
+        }
+        AuditWriteResult::Failed { error } => {
+            tracing::error!(
+                ticket_ref = %log.ticket_ref,
+                export_target = %log.export_target,
+                error = %error,
+                "MANDATORY AUDIT WRITE FAILED - blocking export operation"
+            );
+            Err(error)
+        }
+    }
+}
+
+/// Helper function to create a mandatory audit guard for ticket operations
+pub async fn create_ticket_audit_guard<W: AuditLogWriter>(
+    log: &TicketAuditLog,
+    writer: &W,
+) -> Result<MandatoryAuditGuard, AuditWriteError> {
+    let operation_type = match log.operation {
+        TicketOperation::Issue => MandatoryAuditOperation::TicketIssue,
+        TicketOperation::Use => MandatoryAuditOperation::TicketUse,
+        TicketOperation::Revoke => MandatoryAuditOperation::TicketRevoke,
+        _ => MandatoryAuditOperation::TicketUse, // Default for other operations
+    };
+
+    match writer.write_ticket_log(log).await {
+        AuditWriteResult::Success { log_id } => {
+            Ok(MandatoryAuditGuard::from_written_log(log_id, operation_type))
+        }
+        AuditWriteResult::Failed { error } => {
+            tracing::error!(
+                ticket_id = %log.ticket_id,
+                operation = ?log.operation,
+                error = %error,
+                "MANDATORY AUDIT WRITE FAILED - blocking ticket operation"
+            );
+            Err(error)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -724,5 +1063,105 @@ mod tests {
         let policy = SamplingPolicy::default();
         assert_eq!(policy.sampling_rate, 0.01);
         assert!(policy.verify_checksums);
+    }
+
+    #[test]
+    fn test_audit_write_result() {
+        let success = AuditWriteResult::Success {
+            log_id: "log:001".to_string(),
+        };
+        assert!(success.is_success());
+        assert_eq!(success.log_id(), Some("log:001"));
+
+        let error = AuditWriteError::new(AuditErrorCode::StorageUnavailable, "Storage down");
+        let failed = AuditWriteResult::Failed { error };
+        assert!(!failed.is_success());
+        assert_eq!(failed.log_id(), None);
+    }
+
+    #[test]
+    fn test_audit_write_error() {
+        let error = AuditWriteError::new(AuditErrorCode::StorageUnavailable, "Backend unavailable");
+        assert!(error.retry_allowed);
+        assert_eq!(error.code, AuditErrorCode::StorageUnavailable);
+
+        let error2 = AuditWriteError::new(AuditErrorCode::InvalidData, "Bad format");
+        assert!(!error2.retry_allowed);
+    }
+
+    #[test]
+    fn test_mandatory_audit_guard() {
+        let mut guard = MandatoryAuditGuard::from_written_log(
+            "log:001".to_string(),
+            MandatoryAuditOperation::Decrypt,
+        );
+
+        assert_eq!(guard.log_id(), "log:001");
+        assert_eq!(guard.operation_type(), MandatoryAuditOperation::Decrypt);
+        assert_eq!(guard.state(), AuditGuardState::Pending);
+        assert!(guard.can_proceed());
+
+        guard.mark_completed();
+        assert_eq!(guard.state(), AuditGuardState::Completed);
+        assert!(!guard.can_proceed());
+    }
+
+    #[test]
+    fn test_mandatory_audit_guard_failed() {
+        let mut guard = MandatoryAuditGuard::from_written_log(
+            "log:002".to_string(),
+            MandatoryAuditOperation::Export,
+        );
+
+        guard.mark_failed();
+        assert_eq!(guard.state(), AuditGuardState::Failed);
+        assert!(!guard.can_proceed());
+    }
+
+    #[test]
+    fn test_ticket_audit_log_issue() {
+        let log = TicketAuditLog::issue(
+            "log:001".to_string(),
+            "ticket:001".to_string(),
+            ActorId::new("issuer:001"),
+            ActorId::new("holder:001"),
+            "payload:001".to_string(),
+            vec!["read".to_string()],
+            3600,
+            Some("consent:001".to_string()),
+        );
+
+        assert_eq!(log.operation, TicketOperation::Issue);
+        assert!(log.is_success());
+        assert_eq!(log.validity_seconds, Some(3600));
+    }
+
+    #[test]
+    fn test_ticket_audit_log_use() {
+        let log = TicketAuditLog::use_ticket(
+            "log:002".to_string(),
+            "ticket:001".to_string(),
+            ActorId::new("user:001"),
+            "payload:001".to_string(),
+            1,
+            Some(4),
+        );
+
+        assert_eq!(log.operation, TicketOperation::Use);
+        assert_eq!(log.usage_count, Some(1));
+        assert_eq!(log.remaining_uses, Some(4));
+    }
+
+    #[test]
+    fn test_ticket_audit_log_revoke() {
+        let log = TicketAuditLog::revoke(
+            "log:003".to_string(),
+            "ticket:001".to_string(),
+            ActorId::new("admin:001"),
+            "Policy violation".to_string(),
+        );
+
+        assert_eq!(log.operation, TicketOperation::Revoke);
+        assert_eq!(log.reason, Some("Policy violation".to_string()));
     }
 }

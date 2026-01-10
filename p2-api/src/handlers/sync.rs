@@ -415,12 +415,13 @@ pub async fn verify_commit(
                     last_accessed_at: None,
                     content_type: Some(metadata.content_type),
                     retention_policy_ref: None,
+                    format_version: p2_core::types::PayloadFormatVersion::current(),
                 });
             }
             Err(p2_storage::StorageError::NotFound(_)) => {
                 return Ok(Json(VerifyCommitResponse {
                     is_valid: false,
-                    evidence_level: p2_core::types::EvidenceLevel::B,
+                    evidence_level: l0_core::types::EvidenceLevel::B,
                     mismatch: Some(VerifyMismatch {
                         mismatch_type: "missing_payload".to_string(),
                         expected: ref_id.clone(),
@@ -520,5 +521,12 @@ impl bridge::L0CommitClient for SyncL0ClientWrapper {
 
     async fn current_batch_sequence(&self) -> bridge::L0ClientResult<u64> {
         self.client.current_batch_sequence().await
+    }
+
+    async fn get_map_commits_by_batch(
+        &self,
+        batch_sequence: u64,
+    ) -> bridge::L0ClientResult<std::collections::HashMap<String, PayloadMapCommit>> {
+        self.client.get_map_commits_by_batch(batch_sequence).await
     }
 }

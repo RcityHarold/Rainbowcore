@@ -195,7 +195,8 @@ impl FeeSchedule {
         let mut current_fee = base_calc.final_fee;
         let mut applied_discounts = Vec::new();
         let mut applied_subsidies = Vec::new();
-        let mut total_discount_pct: u16 = 0; // Track cumulative discount percentage
+        #[allow(unused_assignments)]
+        let mut total_discount_pct: u16 = 0; // Track cumulative discount percentage (used for validation, not returned)
 
         // Calculate maximum allowed discount
         let max_discount_amount = (base_calc.final_fee * self.max_total_discount_percentage as u64) / 100;
@@ -238,7 +239,10 @@ impl FeeSchedule {
                     // Ensure minimum fee
                     if new_fee >= min_allowed_fee {
                         current_fee = new_fee;
-                        total_discount_pct += code.percentage as u16;
+                        #[allow(unused_assignments)]
+                        {
+                            total_discount_pct += code.percentage as u16;
+                        }
                         applied_discounts.push(AppliedDiscount {
                             discount_type: DiscountType::PromoCode,
                             percentage: code.percentage,
@@ -273,12 +277,15 @@ impl FeeSchedule {
         // Final minimum fee enforcement
         current_fee = std::cmp::max(current_fee, self.minimum_fee);
 
+        // Save base_final_fee before moving base_calc
+        let base_final_fee = base_calc.final_fee;
+
         FeeCalculationResult {
             base_calculation: base_calc,
             applied_discounts,
             applied_subsidies,
             final_fee_after_discounts: current_fee,
-            total_discount: base_calc.final_fee.saturating_sub(current_fee),
+            total_discount: base_final_fee.saturating_sub(current_fee),
             calculation_timestamp: chrono::Utc::now(),
         }
     }

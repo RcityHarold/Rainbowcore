@@ -38,6 +38,10 @@ sha2 = { workspace = true }
 
 # Random number generation
 getrandom = "0.2"
+rand = "0.8"
+
+# Logging
+tracing = "0.1"
 
 # Zeroize secrets
 zeroize = "1"

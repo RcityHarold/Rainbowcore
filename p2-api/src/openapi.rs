@@ -579,7 +579,7 @@ pub struct MediaType {
     pub schema: Option<SchemaRef>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum SchemaRef {
     Ref(String),

@@ -407,7 +407,7 @@ impl AnchorManager {
         };
 
         let tx_hash = submission.tx_hash.as_ref()
-            .ok_or_else(|| LedgerError::InvalidOperation("No tx_hash for submission".to_string()))?;
+            .ok_or_else(|| LedgerError::Validation("No tx_hash for submission".to_string()))?;
 
         let confirmations = self.provider
             .check_confirmations(submission.chain_type, tx_hash)
@@ -463,13 +463,13 @@ impl AnchorManager {
         };
 
         if submission.status != AnchorSubmissionStatus::Failed {
-            return Err(LedgerError::InvalidOperation(
+            return Err(LedgerError::Validation(
                 "Can only retry failed submissions".to_string()
             ));
         }
 
         if submission.retry_count >= self.config.max_retries {
-            return Err(LedgerError::InvalidOperation(
+            return Err(LedgerError::Validation(
                 format!("Max retries ({}) exceeded", self.config.max_retries)
             ));
         }

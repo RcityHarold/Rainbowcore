@@ -302,6 +302,95 @@ impl SnapshotLedger for FileSnapshotLedger {
             }
         }
     }
+
+    async fn set_snapshot_map_commit(
+        &self,
+        snapshot_id: &str,
+        map_commit_ref: String,
+    ) -> P2Result<()> {
+        // Check if R0 or R1 based on index
+        let snapshot_type = {
+            let cache = self.index_cache.read().await;
+            cache
+                .get(snapshot_id)
+                .map(|e| e.snapshot_type)
+                .ok_or_else(|| P2Error::Storage(format!("Snapshot not found: {}", snapshot_id)))?
+        };
+
+        match snapshot_type {
+            SnapshotIndexType::R0 => {
+                // Read snapshot
+                let mut snapshot = self
+                    .get_r0(snapshot_id)
+                    .await?
+                    .ok_or_else(|| P2Error::Storage(format!("R0 snapshot not found: {}", snapshot_id)))?;
+
+                // Update map_commit_ref
+                snapshot.map_commit_ref.payload_map_commit_ref = map_commit_ref;
+
+                // Write back
+                let path = self.r0_file_path(snapshot_id);
+                self.storage.write(&path, &snapshot, snapshot_id).await?;
+
+                Ok(())
+            }
+            SnapshotIndexType::R1 => {
+                // R1 snapshots don't have map_commit_ref in the same way
+                // For now, just return Ok (could add this field to R1 later if needed)
+                Ok(())
+            }
+        }
+    }
+
+    async fn set_snapshot_receipt(
+        &self,
+        snapshot_id: &str,
+        receipt_id: l0_core::types::ReceiptId,
+    ) -> P2Result<()> {
+        // Check if R0 or R1 based on index
+        let snapshot_type = {
+            let cache = self.index_cache.read().await;
+            cache
+                .get(snapshot_id)
+                .map(|e| e.snapshot_type)
+                .ok_or_else(|| P2Error::Storage(format!("Snapshot not found: {}", snapshot_id)))?
+        };
+
+        match snapshot_type {
+            SnapshotIndexType::R0 => {
+                // Read snapshot
+                let mut snapshot = self
+                    .get_r0(snapshot_id)
+                    .await?
+                    .ok_or_else(|| P2Error::Storage(format!("R0 snapshot not found: {}", snapshot_id)))?;
+
+                // Update receipt_id
+                snapshot.receipt_id = Some(receipt_id);
+
+                // Write back
+                let path = self.r0_file_path(snapshot_id);
+                self.storage.write(&path, &snapshot, snapshot_id).await?;
+
+                Ok(())
+            }
+            SnapshotIndexType::R1 => {
+                // Read snapshot
+                let mut snapshot = self
+                    .get_r1(snapshot_id)
+                    .await?
+                    .ok_or_else(|| P2Error::Storage(format!("R1 snapshot not found: {}", snapshot_id)))?;
+
+                // Update receipt_id
+                snapshot.receipt_id = Some(receipt_id);
+
+                // Write back
+                let path = self.r1_file_path(snapshot_id);
+                self.storage.write(&path, &snapshot, snapshot_id).await?;
+
+                Ok(())
+            }
+        }
+    }
 }
 
 #[cfg(test)]
