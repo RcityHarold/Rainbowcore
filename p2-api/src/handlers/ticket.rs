@@ -1,6 +1,14 @@
 //! Ticket Handlers
 //!
 //! HTTP handlers for access ticket operations.
+//!
+//! # Mandatory Audit Enforcement (ISSUE-003)
+//!
+//! All ticket-based payload access MUST be audited BEFORE the actual data read.
+//! This is enforced via `MandatoryAuditGuard` which ensures:
+//! 1. Audit log is written BEFORE data read
+//! 2. If audit write fails, data access is BLOCKED
+//! 3. Operation completion status is tracked
 
 use axum::{
     extract::{Path, State},
@@ -18,8 +26,11 @@ use crate::{
 use l0_core::types::{ActorId, Digest};
 use p2_core::ledger::{AuditLedger, TicketLedger};
 use p2_core::types::{
-    DecryptAuditLog, DecryptOutcome, PayloadSelector, TicketPermission, TicketRequest, TicketStatus,
+    AuditLogWriter, DecryptAuditLog, DecryptOutcome, MandatoryAuditGuard,
+    PayloadSelector, TicketPermission, TicketRequest, TicketStatus,
+    create_decrypt_audit_guard,
 };
+use p2_core::OperationType;
 use p2_storage::P2StorageBackend;
 
 /// Parse permission string to TicketPermission
@@ -50,6 +61,24 @@ pub async fn create_ticket(
     State(state): State<AppState>,
     Json(request): Json<CreateAccessTicketRequest>,
 ) -> ApiResult<(StatusCode, Json<AccessTicketResponse>)> {
+    // =========================================================================
+    // ISSUE-015: Check degraded mode before ticket issuance
+    // =========================================================================
+    // Ticket issuance requires consent in degraded mode per degradation matrix
+    state.check_degraded_mode_operation(OperationType::IssueTicket)
+        .await
+        .map_err(|e| {
+            tracing::warn!(
+                holder_id = %request.holder_id,
+                error = %e,
+                "Ticket creation blocked/requires consent due to degraded mode"
+            );
+            ApiError::Unavailable(format!(
+                "Ticket creation unavailable: {}",
+                e
+            ))
+        })?;
+
     // Validate that all referenced payloads exist
     for ref_id in &request.ref_ids {
         state.storage.get_metadata(ref_id).await.map_err(|e| match &e {
@@ -262,10 +291,37 @@ pub async fn revoke_ticket(
 }
 
 /// Use ticket to access payload
+///
+/// # Mandatory Audit (ISSUE-003 Fix)
+///
+/// This endpoint enforces **audit-before-access** semantics:
+/// 1. Ticket is validated first
+/// 2. Audit log is written BEFORE any data is read
+/// 3. If audit write fails, the entire operation is BLOCKED
+/// 4. This ensures no payload access can occur without audit trail
 pub async fn use_ticket(
     State(state): State<AppState>,
     Path((ticket_id, ref_id)): Path<(String, String)>,
 ) -> ApiResult<Vec<u8>> {
+    // =========================================================================
+    // ISSUE-015: Check degraded mode before ticket access
+    // =========================================================================
+    // Ticket-based access requires full DSN availability per degradation matrix
+    state.check_degraded_mode_operation(OperationType::Read)
+        .await
+        .map_err(|e| {
+            tracing::warn!(
+                ticket_id = %ticket_id,
+                ref_id = %ref_id,
+                error = %e,
+                "Ticket access blocked due to degraded mode"
+            );
+            ApiError::Unavailable(format!(
+                "Ticket access unavailable: {}",
+                e
+            ))
+        })?;
+
     // 1. Validate and use the ticket
     let ticket = state
         .ticket_ledger
@@ -298,39 +354,66 @@ pub async fn use_ticket(
         ));
     }
 
-    // 4. Read the payload data
-    let data = state
-        .storage
-        .read(&ref_id)
-        .await
-        .map_err(|e| match &e {
-            p2_storage::StorageError::NotFound(_) => {
-                ApiError::not_found(format!("Payload not found: {}", ref_id))
-            }
-            _ => ApiError::from(e),
-        })?;
+    // =========================================================================
+    // 4. MANDATORY AUDIT: Write audit log BEFORE accessing data (ISSUE-003)
+    // =========================================================================
+    //
+    // Per DSN documentation: "Audit logging is NOT optional"
+    // If audit write fails, the operation MUST be blocked.
 
-    // 5. Record audit log (MUST for every decrypt/access)
-    // Compute result digest to prove what was accessed
-    let result_digest = Digest::blake3(&data);
-
-    let mut audit_log = DecryptAuditLog::new(
+    let audit_log = DecryptAuditLog::new(
         format!("audit:{}", uuid::Uuid::new_v4()),
         ticket.ticket_id.clone(),
         ticket.holder.clone(),
         ref_id.clone(),
         ticket.selector.clone(),
         ticket.purpose_digest.clone(),
-        result_digest,
+        Digest::zero(), // Placeholder - actual digest computed after read
         "/api/v1/tickets/:ticket_id/access/:ref_id".to_string(),
     );
-    audit_log.outcome = DecryptOutcome::Success;
 
-    state
-        .audit_ledger
-        .record_decrypt(audit_log)
+    // CRITICAL: Write audit FIRST - blocks if write fails
+    let mut guard = create_decrypt_audit_guard(&audit_log, state.audit_ledger.as_ref())
         .await
-        .map_err(|e| ApiError::internal(format!("Failed to record audit: {}", e)))?;
+        .map_err(|e| {
+            tracing::error!(
+                ticket_id = %ticket_id,
+                ref_id = %ref_id,
+                error = %e,
+                "MANDATORY AUDIT WRITE FAILED - blocking ticket access"
+            );
+            ApiError::internal(format!(
+                "Audit write failed - ticket access blocked for security: {}",
+                e
+            ))
+        })?;
+
+    // 5. Now safe to read the payload data (audit is already recorded)
+    let data = match state.storage.read(&ref_id).await {
+        Ok(data) => {
+            guard.mark_completed();
+            data
+        }
+        Err(e) => {
+            guard.mark_failed();
+            return Err(match &e {
+                p2_storage::StorageError::NotFound(_) => {
+                    ApiError::not_found(format!("Payload not found: {}", ref_id))
+                }
+                _ => ApiError::from(e),
+            });
+        }
+    };
+
+    // Log completion with result digest for verification
+    let result_digest = Digest::blake3(&data);
+    tracing::debug!(
+        log_id = %guard.log_id(),
+        ticket_id = %ticket_id,
+        ref_id = %ref_id,
+        result_digest = %result_digest.to_hex(),
+        "Ticket access completed with mandatory audit"
+    );
 
     Ok(data)
 }

@@ -37,6 +37,7 @@
 //! ```
 
 pub mod backend;
+pub mod backend_migration;
 pub mod compliance;
 pub mod config;
 pub mod error;
@@ -132,6 +133,13 @@ pub use performance::{
         FaultType, FaultConfig, FaultTestResult, FaultInjector, FaultTestHarness,
         DataIntegrityResult,
     },
+};
+// Backend Migration Protocol (ISSUE-012)
+pub use backend_migration::{
+    BackendMigrationExecutor, DualWriteManager, DualWriteStats, MigrationAuditEntry,
+    MigrationConfig, MigrationError, MigrationEvent, MigrationPhase,
+    MigrationResult as BackendMigrationResult,
+    MigrationState, ReEncryptionHandler, RefRemappingRegistry,
 };
 
 /// Storage version

@@ -26,6 +26,7 @@ use std::sync::Arc;
 mod batch;
 mod commands;
 mod interactive;
+mod sanitize;
 
 #[derive(Parser)]
 #[command(name = "l0")]
@@ -836,7 +837,16 @@ async fn run_command(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + 
 
             while session.is_running() {
                 match session.read_line() {
-                    Ok(input) => {
+                    Ok(raw_input) => {
+                        // Sanitize input for security (ISSUE-023)
+                        let input = match sanitize::sanitize_interactive_input(&raw_input) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                eprintln!("Input validation error: {}", e);
+                                continue;
+                            }
+                        };
+
                         if input.is_empty() {
                             continue;
                         }
@@ -854,6 +864,12 @@ async fn run_command(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + 
                         // Parse and execute as L0 command
                         let args = interactive::parse_interactive_args(&input);
                         if !args.is_empty() {
+                            // Validate arguments for shell safety (ISSUE-023)
+                            if let Err(e) = sanitize::sanitize_batch_args(&args) {
+                                eprintln!("Argument validation error: {}", e);
+                                continue;
+                            }
+
                             // Build CLI args: l0 <command> <args...>
                             let mut cli_args = vec!["l0".to_string()];
                             cli_args.push("--db-url".to_string());
@@ -862,20 +878,27 @@ async fn run_command(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + 
                             cli_args.push(session.tenant.clone());
                             cli_args.extend(args);
 
-                            // Execute the command in a subprocess
-                            match std::process::Command::new(&cli_args[0])
-                                .args(&cli_args[1..])
-                                .status()
-                            {
-                                Ok(status) => {
-                                    if !status.success() {
-                                        eprintln!("Command failed with status: {}", status);
+                            // Build safe command (ISSUE-023)
+                            match sanitize::build_safe_command(&cli_args[0], &cli_args[1..]) {
+                                Ok(safe_cmd) => {
+                                    // Execute the command in a subprocess
+                                    match std::process::Command::new(&safe_cmd[0])
+                                        .args(&safe_cmd[1..])
+                                        .status()
+                                    {
+                                        Ok(status) => {
+                                            if !status.success() {
+                                                eprintln!("Command failed with status: {}", status);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            eprintln!("Failed to execute command: {}", e);
+                                            eprintln!("Try: {}", cli_args.join(" "));
+                                        }
                                     }
                                 }
                                 Err(e) => {
-                                    eprintln!("Failed to execute command: {}", e);
-                                    // Fall back to direct interpretation
-                                    eprintln!("Try: {}", cli_args.join(" "));
+                                    eprintln!("Command validation error: {}", e);
                                 }
                             }
                         }
@@ -897,6 +920,12 @@ async fn run_command(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + 
             dry_run,
             verbose,
         } => {
+            // Validate file path (ISSUE-023)
+            let file_str = file.to_string_lossy();
+            if let Err(e) = sanitize::validate_path(&file_str, "batch file") {
+                return Err(format!("Invalid batch file path: {}", e).into());
+            }
+
             println!("Loading batch file: {}", file.display());
 
             let operations = batch::parse_batch_file(&file)?;
@@ -934,6 +963,25 @@ async fn run_command(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + 
                 cli_args.push(cli.tenant.clone());
                 cli_args.push(op.command.clone());
                 cli_args.extend(op.args.iter().cloned());
+
+                // Validate batch arguments (ISSUE-023)
+                if let Err(e) = sanitize::sanitize_batch_args(&cli_args) {
+                    let err = format!("Argument validation error: {}", e);
+                    result.add(batch::BatchOperationResult {
+                        index: i,
+                        operation: op.clone(),
+                        success: false,
+                        output: None,
+                        error: Some(err.clone()),
+                        duration_ms: 0,
+                    });
+                    if !config.continue_on_error {
+                        eprintln!("Batch aborted: {}", err);
+                        result.add_skipped(operations.len() - i - 1);
+                        break;
+                    }
+                    continue;
+                }
 
                 let status = std::process::Command::new(&cli_args[0])
                     .args(&cli_args[1..])

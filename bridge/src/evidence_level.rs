@@ -106,7 +106,7 @@ impl EvidenceCheck {
 }
 
 /// Reason for evidence level downgrade
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DowngradeReason {
     /// No payload_map_commit exists (HARD INVARIANT VIOLATION)
@@ -255,6 +255,183 @@ where
             Err(_) => false,
         }
     }
+
+    /// Attempt to upgrade B-level evidence to A-level (ISSUE-005)
+    ///
+    /// This method checks if previously B-level evidence can now be upgraded to A-level.
+    /// This is used when missing data (receipt, map_commit, etc.) has been backfilled.
+    ///
+    /// # Upgrade Conditions
+    ///
+    /// B-level evidence can be upgraded to A-level when:
+    /// 1. The missing map_commit has been backfilled
+    /// 2. A receipt has been obtained
+    /// 3. The receipt verifies successfully
+    /// 4. All payload digests match
+    /// 5. All payloads are accessible
+    ///
+    /// # Returns
+    ///
+    /// Returns an `UpgradeResult` indicating whether upgrade was successful
+    /// and the new evidence level.
+    pub async fn attempt_upgrade(
+        &self,
+        previous_result: &EvidenceLevelResult,
+        map_commit: Option<&PayloadMapCommit>,
+        receipt_id: Option<&ReceiptId>,
+        p2_payloads: &[SealedPayloadRef],
+    ) -> BridgeResult<UpgradeResult> {
+        // Can only upgrade B-level evidence
+        if previous_result.level != EvidenceLevel::B {
+            return Ok(UpgradeResult {
+                upgraded: false,
+                previous_level: previous_result.level,
+                new_level: previous_result.level,
+                new_result: None,
+                upgrade_reasons: vec![],
+                remaining_issues: vec![],
+            });
+        }
+
+        // Re-determine the evidence level with current data
+        let new_result = self.determine(map_commit, receipt_id, p2_payloads).await?;
+
+        let upgraded = new_result.level == EvidenceLevel::A;
+        let upgrade_reasons = if upgraded {
+            // Find what was fixed
+            previous_result.downgrade_reasons.iter()
+                .filter(|reason| {
+                    // Check if this reason is no longer present
+                    !new_result.downgrade_reasons.contains(reason)
+                })
+                .cloned()
+                .map(|reason| format!("Fixed: {:?}", reason))
+                .collect()
+        } else {
+            vec![]
+        };
+
+        let remaining_issues: Vec<String> = new_result.downgrade_reasons.iter()
+            .map(|r| format!("{:?}", r))
+            .collect();
+
+        Ok(UpgradeResult {
+            upgraded,
+            previous_level: EvidenceLevel::B,
+            new_level: new_result.level,
+            new_result: Some(new_result),
+            upgrade_reasons,
+            remaining_issues,
+        })
+    }
+
+    /// Check what's needed to upgrade B-level evidence to A-level
+    ///
+    /// Returns a list of actions that need to be taken.
+    pub fn get_upgrade_requirements(
+        result: &EvidenceLevelResult,
+    ) -> Vec<UpgradeRequirement> {
+        if result.level == EvidenceLevel::A {
+            return vec![];
+        }
+
+        result.downgrade_reasons.iter().map(|reason| {
+            match reason {
+                DowngradeReason::MissingMapCommit => UpgradeRequirement {
+                    action: "backfill_map_commit".to_string(),
+                    description: "Submit a backfill map_commit to L0".to_string(),
+                    priority: UpgradePriority::Critical,
+                },
+                DowngradeReason::MissingReceipt => UpgradeRequirement {
+                    action: "obtain_receipt".to_string(),
+                    description: "Obtain an L0 receipt for the map_commit".to_string(),
+                    priority: UpgradePriority::High,
+                },
+                DowngradeReason::ReceiptVerificationFailed { details } => UpgradeRequirement {
+                    action: "verify_receipt".to_string(),
+                    description: format!("Resolve receipt verification issue: {}", details),
+                    priority: UpgradePriority::High,
+                },
+                DowngradeReason::DigestMismatch { expected, actual } => UpgradeRequirement {
+                    action: "fix_digest_mismatch".to_string(),
+                    description: format!(
+                        "Resolve digest mismatch (expected: {}, actual: {})",
+                        expected, actual
+                    ),
+                    priority: UpgradePriority::Critical,
+                },
+                DowngradeReason::PayloadsMissing { refs } => UpgradeRequirement {
+                    action: "restore_payloads".to_string(),
+                    description: format!("Restore missing payloads: {:?}", refs),
+                    priority: UpgradePriority::High,
+                },
+                DowngradeReason::CountMismatch { expected, actual } => UpgradeRequirement {
+                    action: "fix_count_mismatch".to_string(),
+                    description: format!(
+                        "Resolve payload count mismatch (expected: {}, actual: {})",
+                        expected, actual
+                    ),
+                    priority: UpgradePriority::Medium,
+                },
+                DowngradeReason::CheckFailed { check_name, details } => UpgradeRequirement {
+                    action: format!("fix_{}", check_name),
+                    description: format!(
+                        "Fix failed check '{}': {}",
+                        check_name,
+                        details.as_deref().unwrap_or("no details")
+                    ),
+                    priority: UpgradePriority::Medium,
+                },
+                DowngradeReason::L0Unavailable { details } => UpgradeRequirement {
+                    action: "retry_when_l0_available".to_string(),
+                    description: format!("Retry when L0 is available: {}", details),
+                    priority: UpgradePriority::Low,
+                },
+            }
+        }).collect()
+    }
+}
+
+/// Result of an evidence level upgrade attempt (ISSUE-005)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpgradeResult {
+    /// Whether upgrade was successful
+    pub upgraded: bool,
+    /// Previous evidence level
+    pub previous_level: EvidenceLevel,
+    /// New evidence level
+    pub new_level: EvidenceLevel,
+    /// New determination result (if re-evaluated)
+    pub new_result: Option<EvidenceLevelResult>,
+    /// Reasons for successful upgrade
+    pub upgrade_reasons: Vec<String>,
+    /// Remaining issues preventing A-level
+    pub remaining_issues: Vec<String>,
+}
+
+/// Requirement for upgrading evidence level
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpgradeRequirement {
+    /// Action identifier
+    pub action: String,
+    /// Human-readable description
+    pub description: String,
+    /// Priority of this requirement
+    pub priority: UpgradePriority,
+}
+
+/// Priority for upgrade requirements
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpgradePriority {
+    /// Critical - must be fixed for any upgrade
+    Critical,
+    /// High priority
+    High,
+    /// Medium priority
+    Medium,
+    /// Low priority - can be addressed later
+    Low,
 }
 
 /// Reconciliation checker for P1-P2 consistency

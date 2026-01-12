@@ -17,11 +17,18 @@
 //! - BLS12-381 curve signatures
 //! - Signature aggregation
 //! - 5/9 threshold verification
+//!
+//! Signature Integrity (ISSUE-017):
+//! - Full signature chain verification
+//! - Signer accountability tracking
+//! - Replay protection
+//! - Freshness validation
 
 pub mod bls;
 pub mod crypto;
 pub mod dkg;
 pub mod error;
+pub mod integrity;
 pub mod session;
 pub mod signer;
 pub mod signer_set;
@@ -30,6 +37,7 @@ pub use bls::*;
 pub use crypto::*;
 pub use dkg::*;
 pub use error::*;
+pub use integrity::*;
 pub use session::*;
 pub use signer::*;
 pub use signer_set::*;

@@ -130,6 +130,11 @@ pub use node_admission::{
     NodeAddress, NetworkProtocol, NodeCapabilities, TrustScore, TrustEvent, TrustEventType,
     RegistrationRequest, HealthCheckResult, NodeHealthChecker, NodeStats, BanRecord,
     AdmissionError, AdmissionResult,
+    // Health checker implementations
+    HttpNodeHealthChecker, MockNodeHealthChecker,
+    HttpNodeAdmissionController, MockNodeAdmissionController,
+    // Connected node status types
+    R0SkeletonStatus, P1ConnectionStatus, NodeConnectivity,
 };
 
 pub use sampling_audit::{

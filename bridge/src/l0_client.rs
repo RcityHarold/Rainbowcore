@@ -743,6 +743,50 @@ impl L0CommitClient for MockL0Client {
     }
 }
 
+// ============================================================================
+// Arc<dyn L0CommitClient> Implementation
+// ============================================================================
+
+use std::sync::Arc;
+
+/// Implementation of L0CommitClient for Arc<dyn L0CommitClient>
+///
+/// This allows using Arc-wrapped trait objects with generic functions
+/// that require L0CommitClient bounds.
+#[async_trait]
+impl L0CommitClient for Arc<dyn L0CommitClient> {
+    async fn submit_commit(&self, commit: &PayloadMapCommit) -> L0ClientResult<ReceiptId> {
+        (**self).submit_commit(commit).await
+    }
+
+    async fn get_receipt(&self, receipt_id: &ReceiptId) -> L0ClientResult<Option<L0Receipt>> {
+        (**self).get_receipt(receipt_id).await
+    }
+
+    async fn verify_receipt(&self, receipt_id: &ReceiptId) -> L0ClientResult<ReceiptVerifyResult> {
+        (**self).verify_receipt(receipt_id).await
+    }
+
+    async fn get_receipts_by_batch(&self, batch_sequence: u64) -> L0ClientResult<Vec<L0Receipt>> {
+        (**self).get_receipts_by_batch(batch_sequence).await
+    }
+
+    async fn health_check(&self) -> L0ClientResult<L0HealthStatus> {
+        (**self).health_check().await
+    }
+
+    async fn current_batch_sequence(&self) -> L0ClientResult<u64> {
+        (**self).current_batch_sequence().await
+    }
+
+    async fn get_map_commits_by_batch(
+        &self,
+        batch_sequence: u64,
+    ) -> L0ClientResult<std::collections::HashMap<String, PayloadMapCommit>> {
+        (**self).get_map_commits_by_batch(batch_sequence).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

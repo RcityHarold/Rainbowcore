@@ -46,6 +46,9 @@ pub use resurrection::{
 pub use sealed_payload::{
     EncryptionMetadata, PayloadFormatVersion, SealedPayloadRef, SealedPayloadStatus, StorageTemperature,
     ThresholdEncryptionInfo,
+    // Tombstone & Deletion Audit types (ISSUE-011)
+    TombstoneMarker, DeletionReason, LegalBasis, CryptoEraseStatus,
+    DeletionAuditEntry, DeletionVerification, DeletionAuditChain,
 };
 pub use selector::{PayloadSelector, SelectorType, SelectorValidation};
 pub use payload_map::{

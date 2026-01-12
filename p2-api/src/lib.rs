@@ -59,10 +59,16 @@ pub mod handlers;
 pub mod middleware;
 pub mod openapi;
 pub mod router;
+pub mod services;
 pub mod state;
 
 pub use error::{ApiError, ApiResult};
 pub use middleware::{AuthClaims, JwtConfig, Permission, RateLimitConfig, RateLimiter, RbacConfig, Role};
+pub use services::{
+    DsnHealthConfig, DsnHealthExt, DsnHealthHandle, DsnHealthMonitor,
+    R0TriggerConfig, R0TriggerEvent, R0TriggerExt, R0TriggerHandle,
+    R0TriggerResult, R0TriggerService,
+};
 pub use openapi::{OpenApiSpec, ApiInfo, PathItem, Components};
 pub use router::create_router;
 pub use state::AppState;

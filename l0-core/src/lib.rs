@@ -19,6 +19,7 @@
 pub mod canon;
 pub mod constants;
 pub mod crypto;
+pub mod epoch_proof;
 pub mod error;
 pub mod ledger;
 pub mod logging;
@@ -33,5 +34,6 @@ pub use soulbase_types::id::Id;
 pub use soulbase_types::subject::Subject;
 
 pub use constants::*;
+pub use epoch_proof::*;
 pub use error::*;
 pub use types::*;

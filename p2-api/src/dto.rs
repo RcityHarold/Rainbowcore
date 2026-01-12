@@ -283,8 +283,86 @@ pub struct MigrateTemperatureRequest {
 }
 
 /// Tombstone request
+///
+/// Per DSN documentation Chapter 4, deletion MUST:
+/// 1. Preserve existence proof (that the payload existed)
+/// 2. Create audit trail (who deleted, when, why)
+/// 3. Retain integrity verification (checksum)
 #[derive(Debug, Deserialize)]
 pub struct TombstoneRequest {
     /// Reason for tombstoning
     pub reason: Option<String>,
+
+    /// Actor who is requesting the deletion
+    pub actor: Option<String>,
+
+    /// Deletion reason category
+    #[serde(default)]
+    pub deletion_reason: Option<DeletionReasonDto>,
+
+    /// Legal basis for deletion (GDPR, CCPA, etc.)
+    pub legal_basis: Option<LegalBasisDto>,
+}
+
+/// Deletion reason DTO
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeletionReasonDto {
+    /// User-initiated deletion (right to be forgotten)
+    UserRequest,
+    /// Retention policy expiration
+    RetentionExpired,
+    /// Legal compliance requirement
+    LegalCompliance,
+    /// Admin action
+    AdminAction,
+    /// Data corruption detected
+    DataCorruption,
+    /// Storage migration cleanup
+    MigrationCleanup,
+    /// Other reason with description
+    Other { description: String },
+}
+
+/// Legal basis DTO
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LegalBasisDto {
+    /// GDPR Article 17 - Right to erasure
+    GdprArticle17,
+    /// CCPA deletion request
+    CcpaRequest,
+    /// Court order
+    CourtOrder,
+    /// Contractual obligation
+    ContractualObligation,
+    /// Consent withdrawal
+    ConsentWithdrawal,
+    /// Other legal basis
+    Other { description: String },
+}
+
+/// Tombstone response
+///
+/// Contains tombstone marker info and audit trail reference.
+#[derive(Debug, Serialize)]
+pub struct TombstoneResponse {
+    /// Reference ID of tombstoned payload
+    pub ref_id: String,
+    /// Original checksum (existence proof)
+    pub original_checksum: String,
+    /// Original size in bytes
+    pub original_size_bytes: u64,
+    /// Tombstone timestamp
+    pub tombstoned_at: DateTime<Utc>,
+    /// Actor who performed deletion
+    pub deleted_by: String,
+    /// Deletion reason
+    pub deletion_reason: String,
+    /// Tombstone digest (integrity proof)
+    pub tombstone_digest: String,
+    /// Audit log reference
+    pub audit_log_ref: String,
+    /// Crypto-erase status
+    pub crypto_erase_status: String,
 }

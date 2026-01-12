@@ -455,6 +455,10 @@ pub struct DegradedModeManager {
     is_degraded: Arc<AtomicBool>,
     /// Explicit consents (operation -> actor IDs that consented)
     consents: Arc<RwLock<std::collections::HashMap<String, HashSet<String>>>>,
+    /// Ticket replay queue (ISSUE-015)
+    ticket_replay_queue: Arc<RwLock<TicketReplayQueue>>,
+    /// Last replay result
+    last_replay_result: Arc<RwLock<Option<TicketReplayResult>>>,
 }
 
 impl DegradedModeManager {
@@ -465,6 +469,8 @@ impl DegradedModeManager {
             policy: Arc::new(RwLock::new(DegradedModePolicy::default())),
             is_degraded: Arc::new(AtomicBool::new(false)),
             consents: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            ticket_replay_queue: Arc::new(RwLock::new(TicketReplayQueue::new())),
+            last_replay_result: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -475,6 +481,20 @@ impl DegradedModeManager {
             policy: Arc::new(RwLock::new(policy)),
             is_degraded: Arc::new(AtomicBool::new(false)),
             consents: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            ticket_replay_queue: Arc::new(RwLock::new(TicketReplayQueue::new())),
+            last_replay_result: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Create with custom replay configuration
+    pub fn with_replay_config(replay_config: TicketReplayConfig) -> Self {
+        Self {
+            state: Arc::new(RwLock::new(DegradedModeState::default())),
+            policy: Arc::new(RwLock::new(DegradedModePolicy::default())),
+            is_degraded: Arc::new(AtomicBool::new(false)),
+            consents: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            ticket_replay_queue: Arc::new(RwLock::new(TicketReplayQueue::with_config(replay_config))),
+            last_replay_result: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -686,6 +706,121 @@ impl DegradedModeManager {
     /// Update policy
     pub async fn update_policy(&self, policy: DegradedModePolicy) {
         *self.policy.write().await = policy;
+    }
+
+    // ========== Ticket Replay Methods (ISSUE-015) ==========
+
+    /// Queue a ticket operation for replay when DSN recovers
+    pub async fn queue_ticket_operation(&self, operation: DegradedModeTicketOperation) {
+        let mut queue = self.ticket_replay_queue.write().await;
+        queue.enqueue(operation);
+
+        // Update queued operations count in state
+        let mut state = self.state.write().await;
+        state.queued_operations += 1;
+    }
+
+    /// Get pending ticket replay count
+    pub async fn pending_replay_count(&self) -> usize {
+        self.ticket_replay_queue.read().await.pending_count()
+    }
+
+    /// Execute ticket replay with provided verifier (ISSUE-015 auto-replay)
+    ///
+    /// This is automatically called during recovery when auto_replay is enabled.
+    pub async fn execute_ticket_replay<V: TicketStateVerifier>(
+        &self,
+        verifier: &V,
+    ) -> TicketReplayResult {
+        tracing::info!("Executing ticket replay on DSN recovery");
+
+        let mut queue = self.ticket_replay_queue.write().await;
+        let result = queue.execute_replay(verifier).await;
+
+        // Store last result
+        *self.last_replay_result.write().await = Some(result.clone());
+
+        // Update state
+        let mut state = self.state.write().await;
+        state.queued_operations = queue.pending_count() as u64;
+
+        result
+    }
+
+    /// Complete recovery with automatic ticket replay (ISSUE-015)
+    ///
+    /// This extends complete_recovery to automatically replay queued ticket operations.
+    pub async fn complete_recovery_with_replay<V: TicketStateVerifier>(
+        &self,
+        verifier: &V,
+    ) -> DegradedModeResult<TicketReplayResult> {
+        // Check if we can complete recovery
+        {
+            let state = self.state.read().await;
+            if !matches!(state.state, DsnAvailabilityState::Recovering | DsnAvailabilityState::Degraded) {
+                return Err(DegradedModeError::InvalidTransition(
+                    format!("Cannot complete recovery from {:?}", state.state)
+                ));
+            }
+        }
+
+        // Check if auto-replay is enabled
+        let auto_replay = self.ticket_replay_queue.read().await.is_auto_replay_enabled();
+
+        // Execute replay if enabled
+        let replay_result = if auto_replay {
+            tracing::info!("Auto-replay enabled, executing ticket replay");
+            self.execute_ticket_replay(verifier).await
+        } else {
+            tracing::info!("Auto-replay disabled, skipping ticket replay");
+            TicketReplayResult::new(0)
+        };
+
+        // Complete recovery
+        {
+            let mut state = self.state.write().await;
+            state.state = DsnAvailabilityState::Available;
+            state.state_started_at = Utc::now();
+            state.reason = "Recovery complete".to_string();
+            state.consecutive_failures = 0;
+            self.is_degraded.store(false, Ordering::Release);
+
+            // Update queued operations count
+            state.queued_operations = self.ticket_replay_queue.read().await.pending_count() as u64;
+        }
+
+        // Clear consents
+        self.consents.write().await.clear();
+
+        // Clear completed operations from queue
+        self.ticket_replay_queue.write().await.clear_completed();
+
+        tracing::info!(
+            reconciled = replay_result.reconciled,
+            conflicts = replay_result.conflicts,
+            "DSN recovery complete with ticket replay"
+        );
+
+        Ok(replay_result)
+    }
+
+    /// Get last replay result
+    pub async fn get_last_replay_result(&self) -> Option<TicketReplayResult> {
+        self.last_replay_result.read().await.clone()
+    }
+
+    /// Check if there are unresolved conflicts from last replay
+    pub async fn has_unresolved_conflicts(&self) -> bool {
+        if let Some(result) = self.last_replay_result.read().await.as_ref() {
+            result.conflicts > 0
+        } else {
+            false
+        }
+    }
+
+    /// Get replay queue for direct access
+    pub async fn get_replay_queue(&self) -> Arc<RwLock<TicketReplayQueue>> {
+        self.ticket_replay_queue.clone()
     }
 
     // ========== P1 and Econ Linkage Methods ==========
@@ -1108,6 +1243,8 @@ pub struct TicketReplayQueue {
     operations: Vec<DegradedModeTicketOperation>,
     /// Queue locked (replay in progress)
     locked: bool,
+    /// Replay configuration
+    config: TicketReplayConfig,
 }
 
 impl TicketReplayQueue {
@@ -1116,9 +1253,23 @@ impl TicketReplayQueue {
         Self::default()
     }
 
+    /// Create with custom configuration
+    pub fn with_config(config: TicketReplayConfig) -> Self {
+        Self {
+            operations: Vec::new(),
+            locked: false,
+            config,
+        }
+    }
+
     /// Add operation to queue
     pub fn enqueue(&mut self, operation: DegradedModeTicketOperation) {
         if !self.locked {
+            tracing::debug!(
+                operation_id = %operation.operation_id,
+                ticket_id = %operation.ticket_id,
+                "Ticket operation queued for replay"
+            );
             self.operations.push(operation);
         }
     }
@@ -1154,11 +1305,231 @@ impl TicketReplayQueue {
             .collect()
     }
 
+    /// Get mutable reference to operations for updating
+    pub fn get_pending_operations_mut(&mut self) -> Vec<&mut DegradedModeTicketOperation> {
+        self.operations.iter_mut()
+            .filter(|op| matches!(op.replay_status, TicketReplayStatus::Pending))
+            .collect()
+    }
+
     /// Update operation status
     pub fn update_status(&mut self, operation_id: &str, status: TicketReplayStatus) {
         if let Some(op) = self.operations.iter_mut().find(|op| op.operation_id == operation_id) {
             op.replay_status = status;
         }
+    }
+
+    /// Execute replay for all pending operations (ISSUE-015)
+    ///
+    /// This is called automatically when DSN recovers from degraded mode.
+    /// Returns TicketReplayResult with statistics and conflict details.
+    pub async fn execute_replay<V: TicketStateVerifier>(
+        &mut self,
+        verifier: &V,
+    ) -> TicketReplayResult {
+        let pending_count = self.pending_count() as u32;
+        let mut result = TicketReplayResult::new(pending_count);
+
+        if pending_count == 0 {
+            tracing::info!("No pending ticket operations to replay");
+            result.complete();
+            return result;
+        }
+
+        tracing::info!(
+            pending_count = pending_count,
+            "Starting ticket replay for queued operations"
+        );
+
+        self.lock();
+
+        // Process in batches
+        let batch_size = self.config.max_batch_size as usize;
+        let mut processed = 0;
+
+        // Collect operation IDs first to avoid borrow issues
+        let operation_ids: Vec<String> = self.operations
+            .iter()
+            .filter(|op| matches!(op.replay_status, TicketReplayStatus::Pending))
+            .map(|op| op.operation_id.clone())
+            .collect();
+
+        for op_id in operation_ids {
+            if processed >= batch_size {
+                tracing::info!(
+                    batch_size = batch_size,
+                    "Batch limit reached, remaining operations will be processed in next batch"
+                );
+                break;
+            }
+
+            // Extract operation data for verification (avoid borrow issues)
+            let op_data = self.operations
+                .iter()
+                .find(|o| o.operation_id == op_id)
+                .map(|op| (op.ticket_id.clone(), op.details_digest.clone(), op.timestamp));
+
+            // Update status to InProgress
+            self.update_status(&op_id, TicketReplayStatus::InProgress);
+
+            // Verify operation if found
+            if let Some((ticket_id, details_digest, timestamp)) = op_data {
+                let verification_result = verifier.verify_ticket_state(
+                    &ticket_id,
+                    &details_digest,
+                    timestamp,
+                ).await;
+
+                match verification_result {
+                    TicketVerificationResult::Valid => {
+                        // Operation is valid, mark as reconciled
+                        self.update_status(&op_id, TicketReplayStatus::Reconciled);
+                        result.reconciled += 1;
+                        tracing::debug!(
+                            operation_id = %op_id,
+                            "Ticket operation reconciled successfully"
+                        );
+                    }
+                    TicketVerificationResult::AlreadyProcessed => {
+                        // Already processed on P1, skip
+                        self.update_status(&op_id, TicketReplayStatus::Skipped);
+                        result.skipped += 1;
+                        tracing::debug!(
+                            operation_id = %op_id,
+                            "Ticket operation already processed, skipping"
+                        );
+                    }
+                    TicketVerificationResult::Conflict(conflict_type, description) => {
+                        // Conflict detected
+                        self.update_status(&op_id, TicketReplayStatus::Conflict);
+                        result.conflicts += 1;
+
+                        let conflict = TicketConflict {
+                            operation_id: op_id.clone(),
+                            ticket_id: ticket_id.clone(),
+                            conflict_type,
+                            description,
+                            resolution: Some(self.config.default_resolution),
+                        };
+                        result.conflict_details.push(conflict);
+
+                        tracing::warn!(
+                            operation_id = %op_id,
+                            ticket_id = %ticket_id,
+                            conflict_type = ?conflict_type,
+                            "Ticket replay conflict detected"
+                        );
+                    }
+                    TicketVerificationResult::Error(error) => {
+                        // Error during verification
+                        self.update_status(&op_id, TicketReplayStatus::Pending); // Re-queue for retry
+                        result.failed += 1;
+                        tracing::error!(
+                            operation_id = %op_id,
+                            error = %error,
+                            "Ticket verification error during replay"
+                        );
+                    }
+                }
+            }
+
+            processed += 1;
+        }
+
+        self.unlock();
+        result.complete();
+
+        tracing::info!(
+            total = result.total_operations,
+            reconciled = result.reconciled,
+            conflicts = result.conflicts,
+            skipped = result.skipped,
+            failed = result.failed,
+            duration_ms = result.duration_ms,
+            "Ticket replay completed"
+        );
+
+        result
+    }
+
+    /// Check if auto-replay is enabled
+    pub fn is_auto_replay_enabled(&self) -> bool {
+        self.config.auto_replay
+    }
+
+    /// Get configuration
+    pub fn config(&self) -> &TicketReplayConfig {
+        &self.config
+    }
+}
+
+/// Result of ticket state verification against P1
+#[derive(Debug, Clone)]
+pub enum TicketVerificationResult {
+    /// Ticket state is valid and matches P1
+    Valid,
+    /// Operation was already processed on P1
+    AlreadyProcessed,
+    /// Conflict detected with P1 state
+    Conflict(TicketConflictType, String),
+    /// Verification error occurred
+    Error(String),
+}
+
+/// Trait for verifying ticket state against P1 (L0 consensus layer)
+///
+/// Implementors should check the current P1 state of a ticket
+/// and verify it matches the degraded mode operation.
+#[async_trait::async_trait]
+pub trait TicketStateVerifier: Send + Sync {
+    /// Verify ticket state against P1
+    ///
+    /// # Arguments
+    /// * `ticket_id` - The ticket to verify
+    /// * `expected_digest` - Expected state digest from degraded mode operation
+    /// * `operation_time` - When the operation was performed
+    ///
+    /// # Returns
+    /// TicketVerificationResult indicating whether the state is valid
+    async fn verify_ticket_state(
+        &self,
+        ticket_id: &str,
+        expected_digest: &Digest,
+        operation_time: DateTime<Utc>,
+    ) -> TicketVerificationResult;
+}
+
+/// Mock ticket state verifier for testing
+#[derive(Debug, Default)]
+pub struct MockTicketStateVerifier {
+    /// Verification results to return (ticket_id -> result)
+    pub results: std::collections::HashMap<String, TicketVerificationResult>,
+}
+
+impl MockTicketStateVerifier {
+    /// Create a new mock verifier
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set verification result for a ticket
+    pub fn set_result(&mut self, ticket_id: &str, result: TicketVerificationResult) {
+        self.results.insert(ticket_id.to_string(), result);
+    }
+}
+
+#[async_trait::async_trait]
+impl TicketStateVerifier for MockTicketStateVerifier {
+    async fn verify_ticket_state(
+        &self,
+        ticket_id: &str,
+        _expected_digest: &Digest,
+        _operation_time: DateTime<Utc>,
+    ) -> TicketVerificationResult {
+        self.results
+            .get(ticket_id)
+            .cloned()
+            .unwrap_or(TicketVerificationResult::Valid)
     }
 }
 
@@ -1279,5 +1650,142 @@ mod tests {
         assert!(policy.allowed_operations.contains(&OperationType::DigestVerify));
         assert!(policy.suspended_operations.contains(&OperationType::Decrypt));
         assert!(policy.consent_required_operations.contains(&OperationType::IssueTicket));
+    }
+
+    #[tokio::test]
+    async fn test_ticket_replay_queue() {
+        let mut queue = TicketReplayQueue::new();
+
+        // Create test operation
+        let operation = DegradedModeTicketOperation {
+            operation_id: "op:001".to_string(),
+            ticket_id: "ticket:001".to_string(),
+            operation_type: TicketOperationType::Issue,
+            actor: "actor:001".to_string(),
+            target_resource: "resource:001".to_string(),
+            timestamp: Utc::now(),
+            consent_used: false,
+            details_digest: Digest::new([1u8; 32]),
+            replay_status: TicketReplayStatus::Pending,
+            local_validation_passed: true,
+        };
+
+        queue.enqueue(operation);
+        assert_eq!(queue.pending_count(), 1);
+
+        // Lock should prevent new enqueues
+        queue.lock();
+        let operation2 = DegradedModeTicketOperation {
+            operation_id: "op:002".to_string(),
+            ticket_id: "ticket:002".to_string(),
+            operation_type: TicketOperationType::Use,
+            actor: "actor:001".to_string(),
+            target_resource: "resource:001".to_string(),
+            timestamp: Utc::now(),
+            consent_used: false,
+            details_digest: Digest::new([2u8; 32]),
+            replay_status: TicketReplayStatus::Pending,
+            local_validation_passed: true,
+        };
+        queue.enqueue(operation2);
+        assert_eq!(queue.pending_count(), 1); // Still 1, not 2
+
+        queue.unlock();
+    }
+
+    #[tokio::test]
+    async fn test_ticket_replay_execution() {
+        let mut queue = TicketReplayQueue::new();
+
+        // Add test operations
+        for i in 0..3u8 {
+            let mut digest_bytes = [0u8; 32];
+            digest_bytes[0] = i;
+            let operation = DegradedModeTicketOperation {
+                operation_id: format!("op:{:03}", i),
+                ticket_id: format!("ticket:{:03}", i),
+                operation_type: TicketOperationType::Issue,
+                actor: "actor:001".to_string(),
+                target_resource: format!("resource:{:03}", i),
+                timestamp: Utc::now(),
+                consent_used: false,
+                details_digest: Digest::new(digest_bytes),
+                replay_status: TicketReplayStatus::Pending,
+                local_validation_passed: true,
+            };
+            queue.enqueue(operation);
+        }
+
+        assert_eq!(queue.pending_count(), 3);
+
+        // Create mock verifier
+        let mut verifier = MockTicketStateVerifier::new();
+        verifier.set_result("ticket:000", TicketVerificationResult::Valid);
+        verifier.set_result("ticket:001", TicketVerificationResult::AlreadyProcessed);
+        verifier.set_result("ticket:002", TicketVerificationResult::Conflict(
+            TicketConflictType::RevokedOnP1,
+            "Ticket was revoked during degraded mode".to_string(),
+        ));
+
+        // Execute replay
+        let result = queue.execute_replay(&verifier).await;
+
+        assert_eq!(result.total_operations, 3);
+        assert_eq!(result.reconciled, 1);
+        assert_eq!(result.skipped, 1);
+        assert_eq!(result.conflicts, 1);
+        assert_eq!(result.conflict_details.len(), 1);
+        assert!(result.completed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_recovery_with_replay() {
+        let manager = DegradedModeManager::new();
+
+        // Enter unavailable mode
+        manager.enter_unavailable_mode("DSN down").await.unwrap();
+
+        // Queue some ticket operations
+        let operation = DegradedModeTicketOperation {
+            operation_id: "op:001".to_string(),
+            ticket_id: "ticket:001".to_string(),
+            operation_type: TicketOperationType::Issue,
+            actor: "actor:001".to_string(),
+            target_resource: "resource:001".to_string(),
+            timestamp: Utc::now(),
+            consent_used: false,
+            details_digest: Digest::new([1u8; 32]),
+            replay_status: TicketReplayStatus::Pending,
+            local_validation_passed: true,
+        };
+        manager.queue_ticket_operation(operation).await;
+
+        assert_eq!(manager.pending_replay_count().await, 1);
+
+        // Start recovery
+        manager.start_recovery().await.unwrap();
+
+        // Complete recovery with replay
+        let verifier = MockTicketStateVerifier::new();
+        let result = manager.complete_recovery_with_replay(&verifier).await.unwrap();
+
+        assert!(result.is_successful());
+        assert_eq!(manager.get_availability().await, DsnAvailabilityState::Available);
+        assert!(!manager.is_degraded());
+    }
+
+    #[test]
+    fn test_ticket_replay_result() {
+        let mut result = TicketReplayResult::new(10);
+        result.reconciled = 7;
+        result.skipped = 2;
+        result.conflicts = 1;
+
+        assert!(!result.is_successful()); // Has conflicts
+        assert!((result.success_rate() - 0.9).abs() < 0.001); // 9/10 = 0.9
+
+        result.conflicts = 0;
+        result.failed = 0;
+        assert!(result.is_successful()); // No conflicts
     }
 }

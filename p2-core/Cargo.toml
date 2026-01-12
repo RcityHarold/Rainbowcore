@@ -46,15 +46,15 @@ tracing = "0.1"
 # Zeroize secrets
 zeroize = "1"
 
-# HTTP client for Vault integration
-reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-features = false, optional = true }
+# HTTP client for Vault integration and node health checks
+reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-features = false }
 
 # Base64 encoding for Vault responses
 base64 = "0.21"
 
 [features]
 default = []
-vault = ["reqwest"]
+vault = []
 
 [dev-dependencies]
 tokio = { workspace = true }

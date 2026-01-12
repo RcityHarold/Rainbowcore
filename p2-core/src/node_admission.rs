@@ -1263,6 +1263,18 @@ impl<H: NodeHealthChecker> NodeAdmissionController<H> {
         *current = policy;
     }
 
+    /// Get a node by ID
+    pub async fn get_node(&self, node_id: &str) -> Option<ConnectedNode> {
+        let nodes = self.nodes.read().await;
+        nodes.get(node_id).cloned()
+    }
+
+    /// Get current policy
+    pub async fn get_policy(&self) -> AdmissionPolicy {
+        let policy = self.policy.read().await;
+        policy.clone()
+    }
+
     /// Clean up expired and inactive nodes
     pub async fn cleanup_inactive(&self) -> usize {
         let policy = self.policy.read().await;
@@ -1308,6 +1320,153 @@ pub struct NodeStats {
     pub average_trust_score: f64,
     /// Stats collection timestamp
     pub collected_at: DateTime<Utc>,
+}
+
+// ============================================================================
+// Default Health Checker Implementations
+// ============================================================================
+
+/// Simple ping-based health checker
+///
+/// This is a basic implementation that checks node health via HTTP ping.
+/// For production, consider implementing more sophisticated health checks.
+pub struct HttpNodeHealthChecker {
+    /// HTTP client
+    client: reqwest::Client,
+    /// Timeout for health checks
+    timeout: std::time::Duration,
+}
+
+impl HttpNodeHealthChecker {
+    /// Create a new HTTP health checker
+    pub fn new() -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            timeout: std::time::Duration::from_secs(5),
+        }
+    }
+
+    /// Create with custom timeout
+    pub fn with_timeout(timeout: std::time::Duration) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            timeout,
+        }
+    }
+}
+
+impl Default for HttpNodeHealthChecker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl NodeHealthChecker for HttpNodeHealthChecker {
+    async fn check_health(&self, node: &ConnectedNode) -> HealthCheckResult {
+        let url = format!(
+            "http://{}:{}/health",
+            node.address.ip, node.address.port
+        );
+
+        let start = std::time::Instant::now();
+
+        match self.client
+            .get(&url)
+            .timeout(self.timeout)
+            .send()
+            .await
+        {
+            Ok(response) => {
+                let latency = start.elapsed().as_millis() as u64;
+                let healthy = response.status().is_success();
+
+                HealthCheckResult {
+                    healthy,
+                    latency_ms: Some(latency),
+                    error: if healthy { None } else {
+                        Some(format!("Unhealthy status: {}", response.status()))
+                    },
+                    checked_at: Utc::now(),
+                    metrics: HashMap::new(),
+                }
+            }
+            Err(e) => {
+                HealthCheckResult {
+                    healthy: false,
+                    latency_ms: None,
+                    error: Some(format!("Connection failed: {}", e)),
+                    checked_at: Utc::now(),
+                    metrics: HashMap::new(),
+                }
+            }
+        }
+    }
+}
+
+/// Mock health checker for testing
+///
+/// Always returns healthy status. Use only in tests.
+pub struct MockNodeHealthChecker {
+    /// Whether to simulate failures
+    fail_mode: std::sync::atomic::AtomicBool,
+}
+
+impl MockNodeHealthChecker {
+    /// Create a new mock health checker
+    pub fn new() -> Self {
+        Self {
+            fail_mode: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Enable failure mode for testing
+    pub fn set_fail_mode(&self, fail: bool) {
+        self.fail_mode.store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl Default for MockNodeHealthChecker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl NodeHealthChecker for MockNodeHealthChecker {
+    async fn check_health(&self, _node: &ConnectedNode) -> HealthCheckResult {
+        let fail = self.fail_mode.load(std::sync::atomic::Ordering::SeqCst);
+
+        HealthCheckResult {
+            healthy: !fail,
+            latency_ms: Some(1),
+            error: if fail { Some("Mock failure mode".to_string()) } else { None },
+            checked_at: Utc::now(),
+            metrics: HashMap::new(),
+        }
+    }
+}
+
+/// Type alias for admission controller with HTTP health checker
+pub type HttpNodeAdmissionController = NodeAdmissionController<HttpNodeHealthChecker>;
+
+/// Type alias for admission controller with mock health checker
+pub type MockNodeAdmissionController = NodeAdmissionController<MockNodeHealthChecker>;
+
+impl HttpNodeAdmissionController {
+    /// Create a new admission controller with HTTP health checker
+    pub fn new_with_http_checker(policy: AdmissionPolicy) -> Self {
+        let health_checker = Arc::new(HttpNodeHealthChecker::new());
+        NodeAdmissionController::new(health_checker, policy)
+    }
+}
+
+impl MockNodeAdmissionController {
+    /// Create a new admission controller with mock health checker (TESTING ONLY)
+    pub fn new_for_testing() -> Self {
+        let health_checker = Arc::new(MockNodeHealthChecker::new());
+        NodeAdmissionController::new(health_checker, AdmissionPolicy::default())
+    }
 }
 
 #[cfg(test)]

@@ -210,6 +210,14 @@ impl PayloadMapEntry {
 ///
 /// This is the primary mechanism for committing payload mappings during
 /// regular batch operations. It's used in the three-phase sync process.
+///
+/// # ISSUE-006: Idempotency and Cutoff Time
+///
+/// Per DSN documentation:
+/// - `idempotency_key`: Prevents duplicate processing of the same commit
+/// - `commit_cutoff_time`: Determines if commit is "normal" or "backfill"
+///   - If submitted before cutoff: normal commit
+///   - If submitted after cutoff: backfill commit (subject to backfill rules)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchMapCommit {
     /// Commit ID
@@ -238,7 +246,26 @@ pub struct BatchMapCommit {
     pub status: MapCommitStatus,
     /// Version info
     pub version_info: MapCommitVersionInfo,
+    /// Idempotency key for duplicate detection (ISSUE-006)
+    ///
+    /// This key is used to detect and reject duplicate commits.
+    /// Format: "{actor_id}:{batch_ref}:{payload_map_digest}"
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+    /// Commit cutoff time (ISSUE-006)
+    ///
+    /// The deadline by which this commit should have been submitted.
+    /// If submitted after this time, the commit is considered a "backfill"
+    /// and subject to additional verification rules.
+    #[serde(default)]
+    pub commit_cutoff_time: Option<DateTime<Utc>>,
+    /// Whether this is a backfill commit
+    #[serde(default)]
+    pub is_backfill: bool,
 }
+
+/// Default cutoff grace period (how long after time_window_end before it's considered backfill)
+const DEFAULT_CUTOFF_GRACE_MINUTES: i64 = 30;
 
 impl BatchMapCommit {
     /// Create a new batch map commit
@@ -263,6 +290,21 @@ impl BatchMapCommit {
         );
         let commit_digest = Digest::blake3(commit_data.as_bytes());
 
+        // Generate idempotency key (ISSUE-006)
+        let idempotency_key = format!(
+            "{}:{}:{}",
+            actor_id.0,
+            batch_ref,
+            payload_map.map_digest.to_hex()
+        );
+
+        // Compute cutoff time (ISSUE-006)
+        // Default: 30 minutes after time_window_end
+        let commit_cutoff_time = time_window_end + chrono::Duration::minutes(DEFAULT_CUTOFF_GRACE_MINUTES);
+
+        // Determine if this is a backfill commit
+        let is_backfill = now > commit_cutoff_time;
+
         Self {
             commit_id,
             batch_ref,
@@ -277,6 +319,52 @@ impl BatchMapCommit {
             receipt_id: None,
             status: MapCommitStatus::Pending,
             version_info: MapCommitVersionInfo::default(),
+            idempotency_key: Some(idempotency_key),
+            commit_cutoff_time: Some(commit_cutoff_time),
+            is_backfill,
+        }
+    }
+
+    /// Create with custom cutoff time
+    pub fn with_cutoff_time(mut self, cutoff_time: DateTime<Utc>) -> Self {
+        self.commit_cutoff_time = Some(cutoff_time);
+        self.is_backfill = self.committed_at > cutoff_time;
+        self
+    }
+
+    /// Check if this commit is a duplicate based on idempotency key
+    pub fn is_duplicate_of(&self, other: &BatchMapCommit) -> bool {
+        match (&self.idempotency_key, &other.idempotency_key) {
+            (Some(k1), Some(k2)) => k1 == k2,
+            _ => false,
+        }
+    }
+
+    /// Get the idempotency key or generate one
+    pub fn get_or_generate_idempotency_key(&self) -> String {
+        self.idempotency_key.clone().unwrap_or_else(|| {
+            format!(
+                "{}:{}:{}",
+                self.actor_id.0,
+                self.batch_ref,
+                self.payload_map.map_digest.to_hex()
+            )
+        })
+    }
+
+    /// Check if commit was submitted within cutoff time
+    pub fn is_within_cutoff(&self) -> bool {
+        !self.is_backfill
+    }
+
+    /// Get time past cutoff (for backfill commits)
+    pub fn time_past_cutoff(&self) -> Option<chrono::Duration> {
+        if self.is_backfill {
+            self.commit_cutoff_time.map(|cutoff| {
+                self.committed_at.signed_duration_since(cutoff)
+            })
+        } else {
+            None
         }
     }
 

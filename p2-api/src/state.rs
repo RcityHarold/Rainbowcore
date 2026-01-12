@@ -10,6 +10,11 @@
 //! ```
 //!
 //! For testing, use `AppState::for_testing()`.
+//!
+//! # Node Admission (ISSUE-004)
+//!
+//! The AppState now includes NodeAdmissionController for managing connected node
+//! admission and cross-node operation authorization.
 
 use std::sync::Arc;
 
@@ -17,6 +22,11 @@ use bridge::L0CommitClient;
 #[cfg(test)]
 use bridge::MockL0Client;
 use p2_core::ledger::{FileAuditLedger, FileEvidenceLedger, FileSnapshotLedger, FileSyncLedger, FileTicketLedger};
+use p2_core::{
+    AdmissionPolicy, HttpNodeAdmissionController, MockNodeAdmissionController,
+    P1ConnectionStatus, R0SkeletonStatus,
+    DegradedModeManager, OperationType, DegradedModeError,
+};
 use p2_storage::LocalStorageBackend;
 
 /// Application state
@@ -36,6 +46,21 @@ pub struct AppState {
     pub snapshot_ledger: Arc<FileSnapshotLedger>,
     /// L0 commit client
     pub l0_client: Arc<dyn L0CommitClient>,
+    /// Node admission controller (ISSUE-004)
+    ///
+    /// Manages connected node registration, trust scoring, and cross-node
+    /// operation authorization. Nodes must have valid R0 skeleton and P1
+    /// connection to participate in cross-node operations.
+    pub node_admission: Arc<HttpNodeAdmissionController>,
+    /// This node's ID (for self-identification)
+    pub node_id: String,
+    /// Degraded mode manager (ISSUE-015)
+    ///
+    /// Handles DSN unavailability scenarios by enforcing the degradation matrix:
+    /// - Prohibit plaintext expansion during DSN down
+    /// - Allow digest-only progression
+    /// - Suspend high-consequence operations
+    pub degraded_mode: Arc<DegradedModeManager>,
 }
 
 impl AppState {
@@ -52,6 +77,11 @@ impl AppState {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let l0_client = Arc::new(bridge::HttpL0Client::new(l0_url));
         Self::with_l0_client(storage_path, l0_client).await
+    }
+
+    /// Generate a unique node ID for this instance
+    fn generate_node_id() -> String {
+        format!("node:{}", uuid::Uuid::new_v4())
     }
 
     /// Create application state for testing with mock L0 client
@@ -101,6 +131,20 @@ impl AppState {
             FileSnapshotLedger::new(format!("{}/snapshots", ledger_path)).await?,
         );
 
+        // Initialize node admission controller (ISSUE-004)
+        let node_admission = Arc::new(
+            HttpNodeAdmissionController::new_with_http_checker(AdmissionPolicy::default())
+        );
+        let node_id = Self::generate_node_id();
+
+        // Initialize degraded mode manager (ISSUE-015)
+        let degraded_mode = Arc::new(DegradedModeManager::new());
+
+        tracing::info!(
+            node_id = %node_id,
+            "Node admission controller and degraded mode manager initialized"
+        );
+
         Ok(Self {
             storage,
             evidence_ledger,
@@ -109,6 +153,9 @@ impl AppState {
             sync_ledger,
             snapshot_ledger,
             l0_client,
+            node_admission,
+            node_id,
+            degraded_mode,
         })
     }
 
@@ -167,6 +214,15 @@ impl AppState {
         let snapshot_ledger = rt
             .block_on(FileSnapshotLedger::new(format!("{}/snapshots", ledger_path)))?;
 
+        // Initialize node admission controller
+        let node_admission = Arc::new(
+            HttpNodeAdmissionController::new_with_http_checker(AdmissionPolicy::default())
+        );
+        let node_id = Self::generate_node_id();
+
+        // Initialize degraded mode manager
+        let degraded_mode = Arc::new(DegradedModeManager::new());
+
         Ok(Self {
             storage,
             evidence_ledger: Arc::new(evidence_ledger),
@@ -175,6 +231,9 @@ impl AppState {
             sync_ledger: Arc::new(sync_ledger),
             snapshot_ledger: Arc::new(snapshot_ledger),
             l0_client,
+            node_admission,
+            node_id,
+            degraded_mode,
         })
     }
 
@@ -201,6 +260,9 @@ impl AppState {
         sync_ledger: Arc<FileSyncLedger>,
         snapshot_ledger: Arc<FileSnapshotLedger>,
         l0_client: Arc<dyn L0CommitClient>,
+        node_admission: Arc<HttpNodeAdmissionController>,
+        node_id: String,
+        degraded_mode: Arc<DegradedModeManager>,
     ) -> Self {
         Self {
             storage,
@@ -210,6 +272,94 @@ impl AppState {
             sync_ledger,
             snapshot_ledger,
             l0_client,
+            node_admission,
+            node_id,
+            degraded_mode,
         }
+    }
+
+    // =========================================================================
+    // Node Admission Methods (ISSUE-004)
+    // =========================================================================
+
+    /// Check if this node can perform cross-node operations
+    ///
+    /// Verifies that the node has valid R0 skeleton and P1 connection.
+    pub async fn can_perform_cross_node_ops(&self) -> bool {
+        match self.node_admission.check_cross_node_admission(&self.node_id).await {
+            Ok(_) => true,
+            Err(e) => {
+                tracing::debug!(
+                    node_id = %self.node_id,
+                    error = %e,
+                    "Cross-node operations not available"
+                );
+                false
+            }
+        }
+    }
+
+    /// Register this node's R0 skeleton status
+    ///
+    /// Call this after R0 snapshot is created to enable cross-node operations.
+    pub async fn register_r0_status(&self, status: R0SkeletonStatus) -> Result<(), Box<dyn std::error::Error>> {
+        self.node_admission
+            .set_r0_status(&self.node_id, status)
+            .await
+            .map_err(|e| e.into())
+    }
+
+    /// Register this node's P1 connection status
+    ///
+    /// Call this after P1/L0 connection is established.
+    pub async fn register_p1_status(&self, status: P1ConnectionStatus) -> Result<(), Box<dyn std::error::Error>> {
+        self.node_admission
+            .set_p1_status(&self.node_id, status)
+            .await
+            .map_err(|e| e.into())
+    }
+
+    /// Get node admission statistics
+    pub async fn get_node_stats(&self) -> p2_core::NodeStats {
+        self.node_admission.get_stats().await
+    }
+
+    // =========================================================================
+    // Degraded Mode Methods (ISSUE-015)
+    // =========================================================================
+
+    /// Check if an operation is allowed in current degraded mode state
+    ///
+    /// Returns Ok if operation is allowed, Err if blocked.
+    pub async fn check_degraded_mode_operation(&self, op: OperationType) -> Result<(), DegradedModeError> {
+        self.degraded_mode.check_operation(op).await?;
+        Ok(())
+    }
+
+    /// Mark DSN as unavailable (trigger degraded mode)
+    pub async fn mark_dsn_unavailable(&self, reason: &str) -> Result<(), DegradedModeError> {
+        self.degraded_mode.enter_unavailable_mode(reason).await?;
+        tracing::warn!(
+            node_id = %self.node_id,
+            reason = %reason,
+            "DSN marked as unavailable - entering degraded mode"
+        );
+        Ok(())
+    }
+
+    /// Mark DSN as available (exit degraded mode via recovery)
+    pub async fn mark_dsn_available(&self) -> Result<(), DegradedModeError> {
+        self.degraded_mode.start_recovery().await?;
+        self.degraded_mode.complete_recovery().await?;
+        tracing::info!(
+            node_id = %self.node_id,
+            "DSN marked as available - exiting degraded mode"
+        );
+        Ok(())
+    }
+
+    /// Check if system is in degraded mode
+    pub fn is_in_degraded_mode(&self) -> bool {
+        self.degraded_mode.is_degraded()
     }
 }

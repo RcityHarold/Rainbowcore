@@ -46,6 +46,7 @@
 
 pub mod backfill;
 pub mod canonicalization;
+pub mod consequence_guard;
 pub mod cross_node_sync;
 pub mod error;
 pub mod evidence_level;
@@ -60,6 +61,10 @@ pub use backfill::{
 pub use canonicalization::{
     CanonicalizationError, CanonicalizationResult, CanonicalizationVersion, Canonicalizer,
     CanonicalizerRegistry, V1Canonicalizer,
+};
+pub use consequence_guard::{
+    ConsequenceBlockedError, ConsequenceCheckResult, ConsequenceGuard, ConsequenceGuardSummary,
+    ConsequenceOperation,
 };
 pub use cross_node_sync::{
     CrossNodeSyncConfig, CrossNodeSyncCoordinator, NodeInfo, NodeInfoUpdate, NodeType,
