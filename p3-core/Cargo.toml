@@ -1,0 +1,46 @@
+[package]
+name = "p3-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "P3 Economy Layer - Settlement, Distribution and Clearing"
+
+[features]
+default = []
+# Enable full crypto support
+full-crypto = ["soulbase-crypto/jws-ed25519", "soulbase-crypto/aead-xchacha"]
+
+[dependencies]
+# Internal dependencies
+l0-core = { path = "../l0-core" }
+p2-core = { path = "../p2-core" }
+
+# Soul-Base infrastructure
+soulbase-types = { workspace = true }
+soulbase-errors = { workspace = true }
+soulbase-crypto = { workspace = true }
+
+# Async
+async-trait = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# P3 specific dependencies
+hex = { workspace = true }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+blake3 = { workspace = true }
+rust_decimal = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tokio = { workspace = true }

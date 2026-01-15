@@ -1,0 +1,45 @@
+[package]
+name = "p3-conformance"
+version.workspace = true
+edition.workspace = true
+description = "P3 Economy Layer Conformance Tests - Test Vectors and CI Gates"
+
+[dependencies]
+# P3 Layer dependencies
+p3-core = { path = "../p3-core" }
+p3-verifier = { path = "../p3-verifier" }
+p3-store = { path = "../p3-store" }
+p3-executor = { path = "../p3-executor" }
+p3-api = { path = "../p3-api" }
+
+# L0 dependencies
+l0-core = { path = "../l0-core" }
+
+# Soulbase infrastructure
+soulbase-types = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Decimal
+rust_decimal = { workspace = true }
+
+# Encoding
+hex = { workspace = true }
+blake3 = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
+proptest = { workspace = true }
+tempfile = { workspace = true }

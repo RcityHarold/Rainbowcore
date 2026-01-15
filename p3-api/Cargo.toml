@@ -1,0 +1,62 @@
+[package]
+name = "p3-api"
+version.workspace = true
+edition.workspace = true
+description = "P3 Economy Layer API - HTTP/gRPC Interfaces"
+
+[dependencies]
+# P3 Layer dependencies
+p3-core = { path = "../p3-core" }
+p3-verifier = { path = "../p3-verifier" }
+p3-store = { path = "../p3-store" }
+p3-executor = { path = "../p3-executor" }
+
+# L0 dependencies
+l0-core = { path = "../l0-core" }
+
+# Soulbase infrastructure
+soulbase-types = { workspace = true }
+
+# HTTP/API
+axum = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { workspace = true }
+
+# gRPC (optional)
+tonic = { workspace = true, optional = true }
+prost = { workspace = true, optional = true }
+
+# Async runtime
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Decimal
+rust_decimal = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Metrics
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener"] }
+
+# Encoding
+hex = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+reqwest = { workspace = true }
+
+[features]
+default = []
+grpc = ["tonic", "prost"]

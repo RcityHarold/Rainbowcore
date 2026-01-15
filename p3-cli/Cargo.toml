@@ -1,0 +1,61 @@
+[package]
+name = "p3-cli"
+version.workspace = true
+edition.workspace = true
+description = "P3 Economy Layer CLI - Command Line Interface"
+
+[[bin]]
+name = "p3"
+path = "src/main.rs"
+
+[dependencies]
+# P3 Layer dependencies
+p3-core = { path = "../p3-core" }
+p3-verifier = { path = "../p3-verifier" }
+p3-store = { path = "../p3-store" }
+p3-executor = { path = "../p3-executor" }
+p3-api = { path = "../p3-api" }
+
+# L0 dependencies
+l0-core = { path = "../l0-core" }
+
+# Soulbase infrastructure
+soulbase-types = { workspace = true }
+soulbase-storage = { workspace = true }
+
+# CLI framework
+clap = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Decimal
+rust_decimal = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Encoding
+hex = { workspace = true }
+
+# HTTP client (for API calls)
+reqwest = { workspace = true }
+
+# Environment
+dotenvy = "0.15"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+tempfile = { workspace = true }

@@ -1,0 +1,34 @@
+[package]
+name = "p3-verifier"
+version = "0.1.0"
+edition = "2021"
+description = "P3 Economy Layer Verification SDK - Third-party verifiable settlement"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/anthropics/rainbowcore"
+keywords = ["p3", "economy", "verification", "settlement"]
+categories = ["cryptography", "finance"]
+
+[dependencies]
+# Internal dependencies
+p3-core = { path = "../p3-core" }
+l0-core = { path = "../l0-core" }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Crypto
+blake3 = "1.5"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+thiserror = "1.0"
+
+# Decimal for financial calculations
+rust_decimal = { version = "1.33", features = ["serde"] }
+
+[dev-dependencies]
+proptest = "1.4"
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros"] }

@@ -1,0 +1,44 @@
+[package]
+name = "p3-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "P3 Economy Layer Storage - SurrealDB integration via soulbase-storage"
+
+[features]
+default = ["surreal"]
+surreal = ["soulbase-storage/surreal"]
+mock = ["soulbase-storage/mock"]
+
+[dependencies]
+p3-core = { path = "../p3-core" }
+l0-core = { path = "../l0-core" }
+
+# Soul-Base infrastructure (reuse SurrealDB integration)
+soulbase-storage = { workspace = true }
+soulbase-errors = { workspace = true }
+soulbase-types = { workspace = true }
+
+# Async
+async-trait = { workspace = true }
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Decimal
+rust_decimal = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }

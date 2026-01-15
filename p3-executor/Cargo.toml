@@ -1,0 +1,28 @@
+[package]
+name = "p3-executor"
+version.workspace = true
+edition.workspace = true
+description = "P3 Economy Layer Executor - Execution Orchestration"
+
+[features]
+default = []
+mock = []
+l0-anchor = ["l0-p4"]
+
+[dependencies]
+p3-core = { path = "../p3-core" }
+p3-verifier = { path = "../p3-verifier" }
+p3-store = { path = "../p3-store" }
+l0-core = { path = "../l0-core" }
+l0-p4 = { path = "../l0-p4", optional = true }
+soulbase-types = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+rust_decimal = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+tracing = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

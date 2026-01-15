@@ -14,6 +14,14 @@ members = [
     "p2-storage",
     "bridge",
     "p2-api",
+    # P3 - Economy Layer
+    "p3-core",
+    "p3-verifier",
+    "p3-store",
+    "p3-executor",
+    "p3-api",
+    "p3-cli",
+    "p3-conformance",
 ]
 
 [workspace.package]
@@ -90,6 +98,7 @@ clap = { version = "4.4", features = ["derive", "env"] }
 # Testing
 # ============================================
 proptest = "1.4"
+tempfile = "3.10"
 
 # ============================================
 # Benchmarking
@@ -102,6 +111,12 @@ criterion = { version = "0.5", features = ["html_reports"] }
 hex = "0.4"
 sha2 = "0.10"
 base64 = "0.21"
+blake3 = "1.5"
+
+# ============================================
+# Decimal arithmetic
+# ============================================
+rust_decimal = { version = "1.33", features = ["serde"] }
 
 # ============================================
 # HTTP client
