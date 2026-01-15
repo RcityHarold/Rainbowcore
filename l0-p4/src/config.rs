@@ -244,6 +244,15 @@ pub struct P4Config {
     /// Maximum fee in satoshis
     #[serde(default = "default_max_fee")]
     pub max_fee_sat: u64,
+    /// Default fee rate (sat/vB) - used when estimation fails
+    #[serde(default)]
+    pub default_fee_rate: Option<u64>,
+    /// Maximum fee rate (sat/vB) - cap on dynamic fee estimation
+    #[serde(default)]
+    pub max_fee_rate: Option<u64>,
+    /// Maximum single transaction fee (satoshis)
+    #[serde(default)]
+    pub max_single_tx_fee: Option<u64>,
 }
 
 fn default_true() -> bool {
@@ -282,6 +291,9 @@ impl Default for P4Config {
             confirmation_interval_secs: 60,
             fee_rate_sat_vb: 10,
             max_fee_sat: 100_000,
+            default_fee_rate: Some(10),
+            max_fee_rate: Some(500),
+            max_single_tx_fee: Some(100_000),
         }
     }
 }
@@ -344,6 +356,13 @@ impl P4Config {
             confirmation_interval_secs: 60,
             fee_rate_sat_vb: if fee_rate == 0 { 10 } else { fee_rate },
             max_fee_sat: 100_000,
+            default_fee_rate: Some(if fee_rate == 0 { 10 } else { fee_rate }),
+            max_fee_rate: env::var("L0_P4_MAX_FEE_RATE")
+                .ok()
+                .and_then(|s| s.parse().ok()),
+            max_single_tx_fee: env::var("L0_P4_MAX_SINGLE_TX_FEE")
+                .ok()
+                .and_then(|s| s.parse().ok()),
         }
     }
 
@@ -363,6 +382,9 @@ impl P4Config {
             confirmation_interval_secs: 5,
             fee_rate_sat_vb: 1,
             max_fee_sat: 10_000,
+            default_fee_rate: Some(1),
+            max_fee_rate: Some(100),
+            max_single_tx_fee: Some(10_000),
         }
     }
 
@@ -378,6 +400,9 @@ impl P4Config {
             confirmation_interval_secs: 30,
             fee_rate_sat_vb: 5,
             max_fee_sat: 50_000,
+            default_fee_rate: Some(5),
+            max_fee_rate: Some(200),
+            max_single_tx_fee: Some(50_000),
         }
     }
 }

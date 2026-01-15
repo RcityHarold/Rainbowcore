@@ -1,12 +1,34 @@
-//! L0 P4 Layer - Blockchain Anchoring
+//! L0 P4 Layer - Blockchain Anchoring (比特币锚定层)
 //!
 //! This crate provides the P4 (Public Proof) layer for the L0 consensus system.
 //! It handles anchoring L0 epoch roots to external blockchains, primarily
 //! Bitcoin and the Atomicals protocol.
 //!
-//! # Architecture
+//! # 架构概述
 //!
-//! The P4 layer consists of several components:
+//! P4 层是"不可否认性增强层"（Immutability Enhancement Layer），不是证据层。
+//! 核心原则：`confirmed ≠ A`（链锚定不等于证据完备）
+//!
+//! ## 四大核心对象
+//!
+//! - [`ChainAnchorInput`]: 锚定输入承诺 - 来自 L0 的待锚定数据
+//! - [`ChainAnchorJob`]: 锚定作业对象 - 执行尝试的最小审计单位
+//! - [`ChainAnchorLink`]: 链锚定结果 - 对账闘合凭据
+//! - [`ReconcileResult`]: 对账结果 - 三状态分离输出
+//!
+//! ## 执行闘环
+//!
+//! ```text
+//! Input → Job → Link → Reconcile
+//! ```
+//!
+//! ## 三状态分离
+//!
+//! - `evidence_status`: A/B/pending_evidence（P4不得改写）
+//! - `execution_status`: pending/executed/resolved
+//! - `chain_anchor_status`: none/queued/confirmed（P4唯一负责）
+//!
+//! # 基础组件
 //!
 //! - **Bitcoin RPC Client**: Interfaces with Bitcoin Core for transaction operations
 //! - **Transaction Builder**: Constructs OP_RETURN transactions with L0 anchor data
@@ -52,8 +74,11 @@ pub mod bitcoin;
 pub mod config;
 pub mod error;
 pub mod monitor;
+pub mod ops;
 pub mod retry;
+pub mod storage;
 pub mod tx_builder;
+pub mod types;
 
 pub use atomicals::{AtomicalsAnchorPayload, AtomicalsClient, AtomicalsCommitReveal};
 pub use bitcoin::{BitcoinRpcClient, TransactionInfo, Utxo};
@@ -62,6 +87,35 @@ pub use error::{P4Error, P4Result};
 pub use monitor::{ConfirmationEvent, ConfirmationMonitor, MonitoredTx, TxStatus};
 pub use retry::{AnchorTaskStatus, PendingAnchor, RetryManager, RetryStrategy};
 pub use tx_builder::{AnchorData, AnchorTxBuilder, BuiltTransaction, L0_ANCHOR_MAGIC};
+
+// P4 存储层导出
+pub use storage::{AnchorStorage, MemoryStorage, SledStorage, StorageConfig, StorageStats};
+
+// P4 执行闘环导出
+pub use ops::{
+    AnchorOps, ExecutionContext, IdempotencyChecker, IdempotencyCheckResult,
+    QuoteResult, SubmitResult, ConfirmResult, LinkResult,
+};
+
+// P4 核心类型导出
+pub use types::{
+    // 通用类型
+    AnchorPriority, CanonVersion, ChainType, Digest32, IdempotencyKey, InputId, JobId,
+    LinkId, PolicyVersion, ReconcileId, Timestamp,
+    // 输入类型
+    ChainAnchorInput, InputStatus, InputValidationError, InputValidationResult,
+    InputValidationWarning,
+    // 作业类型
+    AnchorError, AttemptChain, AttemptRecord, AttemptResult, CapBlockedReason,
+    ChainAnchorJob, JobStatus, JobTransitionError,
+    // 链接类型
+    AnchorDataInfo, ChainAnchorLink, ChainAnchorMismatch, LinkStatus, MerkleProof,
+    MismatchType, ReconciliationError, ReconciliationResult,
+    // 对账类型
+    ChainAnchorStatus, EvidenceStatus, ExecutionStatus, ReconcileErrorCode,
+    ReconcileFailure, ReconcileResult, ReconcileStatus, ThreeStateIssue,
+    ThreeStateValidation,
+};
 
 use std::sync::Arc;
 use std::time::Duration;

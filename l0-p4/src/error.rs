@@ -82,6 +82,18 @@ pub enum P4Error {
     /// Invalid epoch root
     #[error("Invalid epoch root: {0}")]
     InvalidEpochRoot(String),
+
+    /// Invalid input
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
+
+    /// Storage error
+    #[error("Storage error: {0}")]
+    Storage(String),
+
+    /// State transition error
+    #[error("State transition error: {0}")]
+    StateTransition(String),
 }
 
 /// P4 Result type
