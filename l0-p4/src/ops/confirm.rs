@@ -107,7 +107,6 @@ pub async fn execute<S: AnchorStorage + 'static>(
     loop {
         // 检查超时
         if start_time.elapsed() > timeout {
-            let current_confirmations = job.confirmations;
             return Err(P4Error::ConfirmationTimeout {
                 attempts: (start_time.elapsed().as_secs() / poll_interval.as_secs()) as u32,
             });

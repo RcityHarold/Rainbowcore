@@ -102,9 +102,7 @@ pub async fn execute<S: AnchorStorage + 'static>(
 
     // 验证 epoch_root 匹配（从 input 获取）
     if parsed_anchor.epoch_root != input.epoch_root {
-        return Err(P4Error::InvalidInput(format!(
-            "Epoch root mismatch in transaction"
-        )));
+        return Err(P4Error::InvalidInput("Epoch root mismatch in transaction".to_string()));
     }
 
     // 获取区块信息

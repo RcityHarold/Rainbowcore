@@ -65,6 +65,7 @@ impl fmt::Display for Timestamp {
 /// 根据文档第3篇，分级决定"是否入队、优先级、预算承诺"，不决定证据等级。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum AnchorPriority {
     /// 必须锚定（不可丢弃）
     /// - 不能丢弃、不能静默失败
@@ -75,6 +76,7 @@ pub enum AnchorPriority {
     /// 应该锚定（可延迟但不可随意丢弃）
     /// - 应当锚定，但允许延迟/降级（必须显性化原因）
     /// - 不得静默跳过：若不锚定必须有记录（SkippedWithReason）
+    #[default]
     Should = 1,
 
     /// 可选锚定（可根据预算情况丢弃）
@@ -83,11 +85,6 @@ pub enum AnchorPriority {
     May = 2,
 }
 
-impl Default for AnchorPriority {
-    fn default() -> Self {
-        Self::Should
-    }
-}
 
 impl fmt::Display for AnchorPriority {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -152,8 +149,10 @@ impl fmt::Display for CanonVersion {
 /// 重新导出 l0-core 的 AnchorChainType，并添加 P4 特有的扩展。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ChainType {
     /// 比特币主网/测试网
+    #[default]
     Bitcoin,
     /// Atomicals 协议（基于比特币）
     Atomicals,
@@ -161,11 +160,6 @@ pub enum ChainType {
     Internal,
 }
 
-impl Default for ChainType {
-    fn default() -> Self {
-        Self::Bitcoin
-    }
-}
 
 impl fmt::Display for ChainType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

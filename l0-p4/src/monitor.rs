@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::interval;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::bitcoin::BitcoinRpcClient;
 use crate::config::{BitcoinNetwork, P4Config};

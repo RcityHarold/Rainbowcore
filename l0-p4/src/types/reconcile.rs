@@ -71,6 +71,7 @@ pub struct ReconcileResult {
 /// 对账状态
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ReconcileStatus {
     /// 成功（三状态均完成）
     Success,
@@ -79,14 +80,10 @@ pub enum ReconcileStatus {
     /// 失败
     Failed,
     /// 待处理
+    #[default]
     Pending,
 }
 
-impl Default for ReconcileStatus {
-    fn default() -> Self {
-        Self::Pending
-    }
-}
 
 /// 证据状态（与链锚定分离）
 ///
@@ -94,6 +91,7 @@ impl Default for ReconcileStatus {
 /// 核心原则：confirmed ≠ A（链锚定不等于证据完备）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum EvidenceStatus {
     /// 证据等级A（完整）
     /// 注意：这不受链锚定影响
@@ -101,16 +99,12 @@ pub enum EvidenceStatus {
     /// 证据等级B（不完整）
     B,
     /// 证据待处理
+    #[default]
     PendingEvidence,
     /// 证据缺失
     Missing,
 }
 
-impl Default for EvidenceStatus {
-    fn default() -> Self {
-        Self::PendingEvidence
-    }
-}
 
 impl EvidenceStatus {
     /// 是否是完整证据
@@ -130,8 +124,10 @@ impl EvidenceStatus {
 /// 核心原则：executed ≠ resolved（resolved=对账闭合）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ExecutionStatus {
     /// 未开始
+    #[default]
     NotStarted,
     /// 执行中
     InProgress,
@@ -143,11 +139,6 @@ pub enum ExecutionStatus {
     Failed,
 }
 
-impl Default for ExecutionStatus {
-    fn default() -> Self {
-        Self::NotStarted
-    }
-}
 
 impl ExecutionStatus {
     /// 是否已执行
@@ -167,8 +158,10 @@ impl ExecutionStatus {
 /// 核心原则：confirmed ≠ A（链锚定不等于证据完备）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ChainAnchorStatus {
     /// 未锚定
+    #[default]
     None,
     /// 已排队
     Queued,
@@ -178,11 +171,6 @@ pub enum ChainAnchorStatus {
     Failed,
 }
 
-impl Default for ChainAnchorStatus {
-    fn default() -> Self {
-        Self::None
-    }
-}
 
 impl ChainAnchorStatus {
     /// 是否已确认
@@ -500,8 +488,8 @@ impl ReconcileResult {
     /// 计算对账结果摘要
     fn compute_digest(&self) -> Digest32 {
         let mut hasher = Sha256::new();
-        hasher.update(&self.reconcile_id);
-        hasher.update(&self.input_id);
+        hasher.update(self.reconcile_id);
+        hasher.update(self.input_id);
         if let Some(ref link_id) = self.link_id {
             hasher.update(link_id);
         }

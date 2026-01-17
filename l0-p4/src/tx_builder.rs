@@ -61,10 +61,10 @@ impl AnchorData {
     fn compute_checksum(&mut self) {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
-        hasher.update(&self.magic);
+        hasher.update(self.magic);
         hasher.update([self.version]);
         hasher.update(self.epoch_sequence.to_be_bytes());
-        hasher.update(&self.epoch_root);
+        hasher.update(self.epoch_root);
         let hash = hasher.finalize();
         self.checksum.copy_from_slice(&hash[..4]);
     }
@@ -190,7 +190,8 @@ impl AnchorTxBuilder {
 
         // Build OP_RETURN output
         // Script: OP_RETURN <data>
-        let op_return_hex = format!(
+        // Note: Using RPC "data" output type instead of raw script
+        let _op_return_hex = format!(
             "6a{}{}",
             push_data_opcode(op_return_data.len()),
             hex::encode(&op_return_data)
@@ -326,7 +327,8 @@ pub fn parse_anchor_from_tx(tx_hex: &str) -> P4Result<Option<AnchorData>> {
     let tx_bytes = hex::decode(tx_hex)?;
 
     // Look for OP_RETURN (0x6a) followed by L0 magic
-    let magic_pattern = [0x6a, L0_ANCHOR_MAGIC[0], L0_ANCHOR_MAGIC[1]];
+    // Note: Using inline pattern matching below instead of this variable
+    let _magic_pattern = [0x6a, L0_ANCHOR_MAGIC[0], L0_ANCHOR_MAGIC[1]];
 
     for i in 0..tx_bytes.len().saturating_sub(L0_ANCHOR_DATA_SIZE + 2) {
         if tx_bytes[i] == 0x6a {

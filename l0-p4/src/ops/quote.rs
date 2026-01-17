@@ -39,11 +39,7 @@ impl QuoteResult {
     pub fn remaining_validity_ms(&self) -> u64 {
         let now = Timestamp::now().as_millis();
         let until = self.valid_until.as_millis();
-        if now >= until {
-            0
-        } else {
-            until - now
-        }
+        until.saturating_sub(now)
     }
 }
 

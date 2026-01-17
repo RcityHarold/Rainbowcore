@@ -160,6 +160,9 @@ pub async fn execute<S: AnchorStorage + 'static>(
 }
 
 /// 确定对账状态
+///
+/// 注意：此函数目前仅在测试中使用，但保留以供未来对账流程完善使用。
+#[allow(dead_code)]
 fn determine_reconcile_status(
     evidence_status: EvidenceStatus,
     execution_status: ExecutionStatus,
@@ -221,16 +224,6 @@ pub fn create_failure_result(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::AnchorPriority;
-
-    fn create_test_input() -> ChainAnchorInput {
-        ChainAnchorInput::new(
-            1,
-            [0x12; 32],
-            [0x34; 32],
-            AnchorPriority::Must,
-        )
-    }
 
     #[test]
     fn test_determine_reconcile_status_success() {

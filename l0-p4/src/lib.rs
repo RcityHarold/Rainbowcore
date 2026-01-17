@@ -71,19 +71,28 @@
 
 pub mod atomicals;
 pub mod bitcoin;
+pub mod cap;
 pub mod config;
+pub mod degradation;
 pub mod error;
+pub mod integration;
+pub mod metrics;
 pub mod monitor;
 pub mod ops;
+pub mod policy;
+pub mod pool;
 pub mod retry;
+pub mod service;
 pub mod storage;
 pub mod tx_builder;
 pub mod types;
+pub mod verify;
 
 pub use atomicals::{AtomicalsAnchorPayload, AtomicalsClient, AtomicalsCommitReveal};
 pub use bitcoin::{BitcoinRpcClient, TransactionInfo, Utxo};
 pub use config::{AtomicalsConfig, BitcoinNetwork, BitcoinRpcConfig, P4Config};
-pub use error::{P4Error, P4Result};
+pub use error::{P4Error, P4Result, P4ErrorCode, ErrorCategory};
+pub use metrics::{P4Metrics, MetricsSnapshot, PriorityMetrics, HistogramSummary};
 pub use monitor::{ConfirmationEvent, ConfirmationMonitor, MonitoredTx, TxStatus};
 pub use retry::{AnchorTaskStatus, PendingAnchor, RetryManager, RetryStrategy};
 pub use tx_builder::{AnchorData, AnchorTxBuilder, BuiltTransaction, L0_ANCHOR_MAGIC};
@@ -95,6 +104,76 @@ pub use storage::{AnchorStorage, MemoryStorage, SledStorage, StorageConfig, Stor
 pub use ops::{
     AnchorOps, ExecutionContext, IdempotencyChecker, IdempotencyCheckResult,
     QuoteResult, SubmitResult, ConfirmResult, LinkResult,
+};
+
+// P4 策略模块导出
+pub use policy::{
+    ChainAnchorPolicyVersion, PolicyManager, PolicyChangeListener,
+    PoolConfig, FeeConfig, ConfirmationRequirements, RetryConfig, CapConfig,
+    ExhaustionStrategy,
+};
+
+// P4 对象池导出
+pub use pool::{
+    AnchorPool, PriorityQueue, QueueItem, PoolStats,
+    DegradationResult, ExpiredCleanupResult,
+};
+
+// P4 Cap治理导出
+pub use cap::{
+    CapManager, CapManagerStats, BudgetSpendEntry, BudgetSpendStatus,
+    AccountingCategory, AccountingEntry, AccountingLedger, AccountingReport,
+    CategorySummary, DegradationBlockReason, PendingCategory,
+};
+
+// P4 降级处理导出
+pub use degradation::{
+    DegradationHandler, DegradationConfig, DegradationListener,
+    DegradationSignal, DegradationEvent, DegradationEventType,
+    DegradationState, DegradationStrategy, DegradationSummary,
+    determine_strategy,
+    RecoveryManager, RecoveryConfig, RecoveryStatus, RecoveryProgress,
+    RecoveryAction, RecoveryActionType, HealthChecker, HealthCheckResult,
+    DefaultHealthChecker,
+};
+
+// P4 验证模块导出
+pub use verify::{
+    // 验证函数
+    verify_anchor_link, verify_anchor_bundle, verify_confirmations,
+    verify_anchor_link_complete,
+    // 验证结果类型
+    LinkVerificationResult, BundleVerificationResult, ConfirmationVerificationResult,
+    CompleteVerificationResult, VerificationMismatch,
+    // Merkle 证明验证函数（MerkleProof 类型从 types 模块导出）
+    MerkleVerificationResult,
+    verify_merkle_proof, verify_merkle_proof_bytes, verify_merkle_proof_detailed,
+    build_merkle_tree, generate_merkle_proof,
+    extract_merkle_root, extract_prev_block_hash, extract_timestamp,
+    compute_block_hash, double_sha256,
+    // 伪背书检测
+    FakeEndorsementDetector, FakeEndorsement, FakeEndorsementType,
+    FakeEndorsementEvidence, DetectionSummary,
+};
+
+// P4 集成模块导出
+pub use integration::{
+    // L0 集成
+    L0Integration, MockL0Integration, L0IntegrationImpl,
+    // P3 集成
+    P3Integration, MockP3Integration, P3IntegrationImpl,
+    // 通用类型
+    EpochInfo, EpochAnchorState, BudgetInfo, SpendReport, SpendType,
+};
+
+// P4 服务层导出
+pub use service::{
+    P4Service, P4ServiceConfig, P4ServiceBuilder,
+    ServiceStatus, ServiceStats,
+    BackgroundRunner, RunnerHandle,
+    // 批量操作类型
+    BatchAnchorRequest, BatchSubmitResult, BatchSubmitSuccess, BatchSubmitFailure,
+    BatchVerifyResult, BatchVerifyItem, BatchStatusItem, AnchorStatus,
 };
 
 // P4 核心类型导出
@@ -356,7 +435,7 @@ impl P4Client {
                 debug!(
                     "Root mismatch: expected {}, got {}",
                     hex::encode(expected_root),
-                    hex::encode(&anchor_data.epoch_root)
+                    hex::encode(anchor_data.epoch_root)
                 );
                 return Ok(false);
             }

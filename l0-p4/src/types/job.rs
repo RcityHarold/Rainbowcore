@@ -105,8 +105,10 @@ pub struct ChainAnchorJob {
 /// - 任意状态不得"删除作业"来洗失败
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum JobStatus {
     /// 已排队（等待执行）
+    #[default]
     Queued,
 
     /// 已提交（交易已广播）
@@ -128,11 +130,6 @@ pub enum JobStatus {
     CapBlocked,
 }
 
-impl Default for JobStatus {
-    fn default() -> Self {
-        Self::Queued
-    }
-}
 
 impl JobStatus {
     /// 是否是终态

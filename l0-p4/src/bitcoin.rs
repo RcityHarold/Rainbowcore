@@ -7,7 +7,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::BitcoinRpcConfig;
 use crate::error::{P4Error, P4Result};
@@ -99,7 +99,8 @@ pub struct BlockInfo {
     /// Number of confirmations
     pub confirmations: i32,
     /// Number of transactions
-    pub nTx: u32,
+    #[serde(rename = "nTx")]
+    pub n_tx: u32,
 }
 
 /// Network info from RPC
@@ -192,7 +193,7 @@ impl BitcoinRpcClient {
 
         let response = self
             .client
-            .post(&self.config.rpc_url())
+            .post(self.config.rpc_url())
             .header("Authorization", auth_header)
             .header("Content-Type", "application/json")
             .json(&request)
@@ -271,6 +272,7 @@ impl BitcoinRpcClient {
     /// Get transaction info
     pub async fn get_transaction_info(&self, txid: &str) -> P4Result<TransactionInfo> {
         #[derive(Deserialize)]
+        #[allow(dead_code)]
         struct RawTx {
             txid: String,
             hash: String,
@@ -350,7 +352,8 @@ impl BitcoinRpcClient {
             txid: String,
             vout: u32,
             address: Option<String>,
-            scriptPubKey: String,
+            #[serde(rename = "scriptPubKey")]
+            script_pub_key: String,
             amount: f64,
             confirmations: u32,
             spendable: bool,
@@ -368,7 +371,7 @@ impl BitcoinRpcClient {
             .map(|u| Utxo {
                 txid: u.txid,
                 vout: u.vout,
-                script_pub_key: u.scriptPubKey,
+                script_pub_key: u.script_pub_key,
                 amount_sat: (u.amount * 100_000_000.0) as u64,
                 confirmations: u.confirmations,
                 spendable: u.spendable,
@@ -451,6 +454,7 @@ impl BitcoinRpcClient {
     /// Test mempool accept
     pub async fn test_mempool_accept(&self, hex: &str) -> P4Result<bool> {
         #[derive(Deserialize)]
+        #[allow(dead_code)]
         struct TestResult {
             txid: String,
             allowed: bool,

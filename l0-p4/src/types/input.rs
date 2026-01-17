@@ -76,8 +76,10 @@ pub struct ChainAnchorInput {
 /// 输入状态
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum InputStatus {
     /// 待处理
+    #[default]
     Pending,
     /// 已排队（等待Job创建）
     Queued,
@@ -91,11 +93,6 @@ pub enum InputStatus {
     Skipped,
 }
 
-impl Default for InputStatus {
-    fn default() -> Self {
-        Self::Pending
-    }
-}
 
 impl ChainAnchorInput {
     /// 创建新的锚定输入
@@ -196,9 +193,9 @@ impl ChainAnchorInput {
         let mut hasher = Sha256::new();
 
         // 按照规范顺序序列化
-        hasher.update(&self.epoch_root);
+        hasher.update(self.epoch_root);
         hasher.update(self.epoch_sequence.to_be_bytes());
-        hasher.update(&self.linked_receipt_ids_digest);
+        hasher.update(self.linked_receipt_ids_digest);
         hasher.update(self.signer_set_version.to_be_bytes());
         hasher.update(self.policy_version.to_bytes());
         hasher.update(self.canon_version.to_bytes());
@@ -226,10 +223,10 @@ impl ChainAnchorInput {
         let mut hasher = Sha256::new();
 
         // epoch_root
-        hasher.update(&self.epoch_root);
+        hasher.update(self.epoch_root);
 
         // linked_receipt_ids_digest
-        hasher.update(&self.linked_receipt_ids_digest);
+        hasher.update(self.linked_receipt_ids_digest);
 
         // policy_version (as bytes)
         hasher.update(self.policy_version.to_bytes());

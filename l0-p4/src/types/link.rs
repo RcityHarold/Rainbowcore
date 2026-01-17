@@ -103,8 +103,10 @@ pub struct ChainAnchorLink {
 /// Link状态
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum LinkStatus {
     /// 无锚定
+    #[default]
     None,
     /// 已排队（交易已广播）
     Queued,
@@ -116,11 +118,6 @@ pub enum LinkStatus {
     Superseded,
 }
 
-impl Default for LinkStatus {
-    fn default() -> Self {
-        Self::None
-    }
-}
 
 /// 锚定数据信息（用于验证）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -249,6 +246,7 @@ pub enum ReconciliationError {
 
 impl ChainAnchorLink {
     /// 创建新的链锚定结果
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         job_id: JobId,
         input_id: InputId,
@@ -368,7 +366,7 @@ impl ChainAnchorLink {
         if self.epoch_root != *expected_epoch_root {
             errors.push(ReconciliationError::EpochRootMismatch {
                 expected: hex::encode(expected_epoch_root),
-                actual: hex::encode(&self.epoch_root),
+                actual: hex::encode(self.epoch_root),
             });
         }
 
@@ -376,7 +374,7 @@ impl ChainAnchorLink {
         if self.linked_receipt_ids_digest != *expected_receipt_digest {
             errors.push(ReconciliationError::ReceiptDigestMismatch {
                 expected: hex::encode(expected_receipt_digest),
-                actual: hex::encode(&self.linked_receipt_ids_digest),
+                actual: hex::encode(self.linked_receipt_ids_digest),
             });
         }
 
@@ -393,7 +391,7 @@ impl ChainAnchorLink {
             if anchor_data.epoch_root != *expected_epoch_root {
                 errors.push(ReconciliationError::EpochRootMismatch {
                     expected: hex::encode(expected_epoch_root),
-                    actual: hex::encode(&anchor_data.epoch_root),
+                    actual: hex::encode(anchor_data.epoch_root),
                 });
             }
         }
@@ -418,9 +416,9 @@ impl ChainAnchorLink {
     /// 计算对账摘要
     fn compute_reconciliation_digest(&self) -> Digest32 {
         let mut hasher = Sha256::new();
-        hasher.update(&self.link_id);
-        hasher.update(&self.epoch_root);
-        hasher.update(&self.linked_receipt_ids_digest);
+        hasher.update(self.link_id);
+        hasher.update(self.epoch_root);
+        hasher.update(self.linked_receipt_ids_digest);
         hasher.update(self.txid_or_asset_id.as_bytes());
         hasher.update(self.confirmations.to_be_bytes());
         let result = hasher.finalize();
@@ -432,11 +430,11 @@ impl ChainAnchorLink {
     /// 计算Link摘要
     pub fn compute_digest(&self) -> Digest32 {
         let mut hasher = Sha256::new();
-        hasher.update(&self.link_id);
-        hasher.update(&self.job_id);
-        hasher.update(&self.input_id);
-        hasher.update(&self.epoch_root);
-        hasher.update(&self.linked_receipt_ids_digest);
+        hasher.update(self.link_id);
+        hasher.update(self.job_id);
+        hasher.update(self.input_id);
+        hasher.update(self.epoch_root);
+        hasher.update(self.linked_receipt_ids_digest);
         hasher.update(self.txid_or_asset_id.as_bytes());
         hasher.update(self.policy_version.to_bytes());
         hasher.update([self.status as u8]);

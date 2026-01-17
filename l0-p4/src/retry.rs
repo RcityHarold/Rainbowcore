@@ -11,7 +11,7 @@ use crate::bitcoin::BitcoinRpcClient;
 use crate::config::P4Config;
 use crate::error::{P4Error, P4Result};
 use crate::monitor::{ConfirmationMonitor, TxStatus};
-use crate::tx_builder::{AnchorData, AnchorTxBuilder, BuiltTransaction};
+use crate::tx_builder::AnchorTxBuilder;
 
 /// Retry strategy
 #[derive(Debug, Clone)]

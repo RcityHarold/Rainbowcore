@@ -7,10 +7,11 @@ use serde::{Deserialize, Serialize};
 use std::env;
 
 /// Bitcoin network type
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BitcoinNetwork {
     /// Bitcoin mainnet
+    #[default]
     Mainnet,
     /// Bitcoin testnet
     Testnet,
@@ -20,15 +21,9 @@ pub enum BitcoinNetwork {
     Regtest,
 }
 
-impl Default for BitcoinNetwork {
-    fn default() -> Self {
-        Self::Mainnet
-    }
-}
-
 impl BitcoinNetwork {
     /// Parse from string (for environment variables)
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "mainnet" | "main" => Some(Self::Mainnet),
             "testnet" | "test" => Some(Self::Testnet),
@@ -117,7 +112,7 @@ impl BitcoinRpcConfig {
     pub fn from_env() -> Self {
         let network = env::var("L0_P4_BITCOIN_NETWORK")
             .ok()
-            .and_then(|s| BitcoinNetwork::from_str(&s))
+            .and_then(|s| BitcoinNetwork::parse(&s))
             .unwrap_or(BitcoinNetwork::Testnet);
 
         let default_port = network.default_port();
@@ -199,10 +194,23 @@ pub struct AtomicalsConfig {
     /// Default mint bitworkc (mining difficulty)
     #[serde(default = "default_bitworkc")]
     pub default_bitworkc: String,
+    /// Default fee rate in sat/vB
+    #[serde(default = "default_atomicals_fee_rate")]
+    pub fee_rate: Option<u64>,
+    /// Use CBOR encoding (true) or JSON (false) for payloads
+    #[serde(default)]
+    pub use_cbor: Option<bool>,
+    /// Use testnet instead of mainnet
+    #[serde(default)]
+    pub testnet: bool,
 }
 
 fn default_bitworkc() -> String {
     "1234".to_string()
+}
+
+fn default_atomicals_fee_rate() -> Option<u64> {
+    Some(10)
 }
 
 impl Default for AtomicalsConfig {
@@ -212,6 +220,9 @@ impl Default for AtomicalsConfig {
             api_url: Some("https://ep.atomicals.xyz/proxy".to_string()),
             bitcoin_rpc: BitcoinRpcConfig::default(),
             default_bitworkc: "1234".to_string(),
+            fee_rate: Some(10),
+            use_cbor: Some(false),
+            testnet: false,
         }
     }
 }
@@ -330,6 +341,15 @@ impl P4Config {
                 bitcoin_rpc: bitcoin.clone(),
                 default_bitworkc: env::var("L0_P4_ATOMICALS_BITWORKC")
                     .unwrap_or_else(|_| "1234".to_string()),
+                fee_rate: env::var("L0_P4_ATOMICALS_FEE_RATE")
+                    .ok()
+                    .and_then(|s| s.parse().ok()),
+                use_cbor: env::var("L0_P4_ATOMICALS_USE_CBOR")
+                    .map(|s| s.to_lowercase() == "true" || s == "1")
+                    .ok(),
+                testnet: env::var("L0_P4_ATOMICALS_TESTNET")
+                    .map(|s| s.to_lowercase() == "true" || s == "1")
+                    .unwrap_or(false),
             })
         } else {
             None
